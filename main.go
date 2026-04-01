@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net"
 )
@@ -23,24 +24,46 @@ func listen() {
 			log.Fatal("Error accepting connection:", err)
 		}
 
-		go handleConnection(conn)
+		go initHandshake(conn)
 	}
 }
 
-func handleConnection(conn net.Conn) {
+func initHandshake(conn net.Conn) {
 	println("Client connected:", conn.RemoteAddr().String())
 	defer conn.Close()
 
-	buf := make([]byte, 1024)
-	_, err := conn.Read(buf)
-	if err != nil {
-		log.Fatal("Error reading from connection:", err)
-		panic(err)
+	// Read the first byte (C0) from the client
+	c0_buf := readBytes(conn, 1)
+	if c0_buf == nil {
+		log.Fatal("Failed to read C0 byte from client")
+		return
+	}
+	// If the first byte is not 0x03, it's an invalid handshake
+	if c0_buf[0] != 0x03 {
+		log.Fatal("Invalid handshake byte received:", c0_buf[0])
+		_, err := conn.Write([]byte{0x03})
+		if err != nil {
+			log.Fatal("Error writing to connection:", err)
+		}
+		panic(fmt.Sprintf("[HANDSHAKE] Expected 0x03, got %v", c0_buf[0]))
 	}
 
-	_, err = conn.Write([]byte("Hello, Client!\n"))
+	c1_buf := readBytes(conn, 1536)
+	_, err := conn.Read(c1_buf)
 	if err != nil {
 		log.Fatal("Error writing to connection:", err)
 		panic(err)
 	}
+}
+
+func readBytes(conn net.Conn, numBytes int) []byte {
+	buf := make([]byte, numBytes)
+	_, err := conn.Read(buf)
+	if err != nil {
+		log.Fatal("Error reading from connection:", err)
+		return nil
+	}
+	fmt.Printf("Received from client: %v\n", buf)
+
+	return buf
 }
