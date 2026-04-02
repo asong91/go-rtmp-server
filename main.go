@@ -49,10 +49,19 @@ func initHandshake(conn net.Conn) {
 	}
 
 	c1_buf := readBytes(conn, 1536)
-	_, err := conn.Read(c1_buf)
-	if err != nil {
-		log.Fatal("Error writing to connection:", err)
-		panic(err)
+	// _, err := conn.Read(c1_buf)
+	if c1_buf == nil {
+		log.Fatal("Failed to read C1 byte from client")
+		return
+	}
+
+	sendBytes(conn, []byte{0x03})
+	sendBytes(conn, c1_buf)
+
+	c2_buf := readBytes(conn, 1536)
+	if c2_buf == nil {
+		log.Fatal("Failed to read C2 byte from client")
+		return
 	}
 }
 
@@ -66,4 +75,12 @@ func readBytes(conn net.Conn, numBytes int) []byte {
 	fmt.Printf("Received from client: %v\n", buf)
 
 	return buf
+}
+
+func sendBytes(conn net.Conn, data []byte) {
+	fmt.Printf("Sending bytes %d \n", len(data))
+	_, err := conn.Write(data)
+	if err != nil {
+		log.Fatal("Error writing to connection:", err)
+	}
 }
