@@ -5,13 +5,17 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"time"
 )
 
 const S1_C1_SIZE = 1536
 
+var conn net.Conn
+
 func main() {
+	slog.SetLogLoggerLevel(slog.LevelDebug)
 	println("Welcome to the TCP server!")
 	listen()
 }
@@ -24,33 +28,46 @@ func listen() {
 	defer listener.Close()
 
 	for {
-		conn, err := listener.Accept()
+		conn, err = listener.Accept()
 		if err != nil {
 			log.Fatal("Error accepting connection:", err)
 		}
 
-		go rtmp(conn)
+		go rtmp()
 	}
 }
 
-func rtmp(conn net.Conn) {
+func rtmp() {
 	println("Client connected:", conn.RemoteAddr().String())
-	_, err := initializeHandshake(conn)
+	_, err := initializeHandshake()
 	if err != nil {
 		log.Fatal("Handshake failed:", err)
 	}
+	fmt.Println("---HANDSHAKE COMPLETE!---")
 
-	readHeader(conn)
+	readReq()
 	defer conn.Close()
 }
 
-func readHeader(conn net.Conn) {
-	chunkType := readChunkBasicHeader(conn)
-	readChunkMessageHeader(conn, chunkType)
+func readReq() {
+	for {
+		chunkType := readChunkBasicHeader()
+		readChunkMessageHeader(chunkType)
+	}
+	// if err != nil {
+	// 	panic(err)
+	// }
+	// fmt.Println("----HEADER-----")
+	// fmt.Printf(`\tType: %d\n
+	// 	\tTimestamp:%d\n
+	// 	\tMessageLength: %d\n
+	// 	\tMessageTypeID: %d\n
+	// 	\tMessageStreamID: %d`,
+	// 	msgHeader.Type, msgHeader.Timestamp, msgHeader.MessageLength, msgHeader.MessageTypeID, msgHeader.MessageStreamID)
 }
 
-func readChunkBasicHeader(conn net.Conn) byte {
-	header := readBytes(conn, 1)
+func readChunkBasicHeader() byte {
+	header := readBytes(1)
 
 	// CSID TYPE
 	csIdType := (header[0] & 0x3F)
@@ -61,11 +78,11 @@ func readChunkBasicHeader(conn net.Conn) byte {
 	*/
 	switch csIdType {
 	case 0:
-		csIdByte := readBytes(conn, 1)
+		csIdByte := readBytes(1)
 		csId = int(csIdByte[0]) + 64
 		fmt.Printf("cs id type 0, % x\n", csId)
 	case 1:
-		csIdByte := readBytes(conn, 2)
+		csIdByte := readBytes(2)
 		csId = int(csIdByte[1])*256 + int(csIdByte[0]) + 64
 		fmt.Printf("cs id type 1, % x\n", csId)
 	default:
@@ -76,49 +93,87 @@ func readChunkBasicHeader(conn net.Conn) byte {
 	return chunkType
 }
 
-func readChunkMessageHeader(conn net.Conn, chunkType byte) {
+func readChunkMessageHeader(chunkType byte) {
+	// var timestamp []byte
+	// var msgLen []byte
+	// var msgTypeId byte
+	// var msgStreamId []byte
 
 	switch chunkType {
-	case 0x0:
-		header := readBytes(conn, 11)
-		fmt.Printf("message header 0, % x\n", header)
-	case 0x1:
-		header := readBytes(conn, 7)
-		fmt.Printf("message header 1, % x\n", header)
-	case 0x2:
-		header := readBytes(conn, 3)
-		fmt.Printf("message header 2, % x\n", header)
-	case 0x3:
+	case 0x0: // Type 0
+		header := readBytes(11)
+		msgLen, msgTypeId := parseType0Header(header)
+		payload := readMessage(msgLen, 128)
+		switch msgTypeId {
+		case 0x14:
+			parseAMF0(payload)
+			buf := genWindowAckSizeMessage(2_500_000)
+			sendBytes(buf)
+			sendBytes(genPeerBandwidthMessage(2_500_000, 2))
+			readBytes(12)
+
+		}
+	case 0x1: // Type 1
+		header := readBytes(7)
+		timestamp := header[0:3]
+		fmt.Printf("message header type 1, % x\n\ttimestamp: % x\n", header, timestamp)
+	case 0x2: // Type 2
+		header := readBytes(3)
+		timestamp := header[0:3]
+		fmt.Printf("message header type 2, % x\n\ttimestamp: % x\n", header, timestamp)
+	case 0x3: // Type 3
 		// TODO: This is some special case
-		header := readBytes(conn, 11)
-		fmt.Printf("message header 3, % x\n", header)
+		fmt.Printf("message header type 3, no chunk message header")
 	}
 }
 
-// func getCsType(conn net.Conn, input []byte) (int) {
-// 	return
-// }
+func parseType0Header(data []byte) (int, byte) {
+	// TODO: Possibly should return back the whole payload
+	timestamp := data[0:3]
+	if timestamp[0] == 0xFF && timestamp[1] == 0xFF && timestamp[2] == 0xFF {
+		fmt.Printf("WARNING: [readChunkMessageHeader] type 0 has extended timestamp")
+	}
+	msgLen := data[3:6]
+	msgTypeId := data[6] // 20 is AMF0 17 is AMF3
+	msgStreamId := data[7:11]
 
-// func readHeader(conn net.Conn) (int, error) {
-// 	header := make([]byte, 1)
-// 	n, err := conn.Read(header)
-// 	if err != nil {
-// 		log.Fatal("Error reading header from connection:", err)
-// 		return 0, err
-// 	}
-// 	fmt.Printf("Received header: %v\n", header[:n])
+	fmt.Printf("message header type 0, % x\n\ttimestamp: % x\n\tmessage length: % x\n\tmessage type id: % x\n\tmessage steam id: % x\n", data, timestamp, msgLen, msgTypeId, msgStreamId)
+	return int(byteSliceToInt(msgLen)), msgTypeId
 
-// 	// Read fmt type by checking first 2 bits of the header
-// 	fmtType := header[0] & 0xC0
-// 	fmt.Printf("Chunk Header Type Is: %d", fmtType)
-// 	return int(fmtType), nil
-// }
+}
 
-func initializeHandshake(conn net.Conn) (int, error) {
+func readMessage(msgLen int, chunkSize int) []byte {
+	fmt.Printf("[readMessage]: msgLen: %d chunkSize: %d\n", msgLen, chunkSize)
+	buf := make([]byte, 0, msgLen)
+	remaining := msgLen
+
+	for remaining > 0 {
+		toRead := chunkSize
+		if remaining < chunkSize {
+			toRead = remaining
+		}
+
+		chunk := readBytes(toRead)
+		buf = append(buf, chunk...)
+		remaining -= toRead
+
+		// if more data remains, consume the 0xC3 continuation header
+		if remaining > 0 {
+			header := readBytes(1)
+			if header[0] != 0xC3 {
+				fmt.Printf("WARNING: expected 0xC3 continuation header, got %02x\n", header[0])
+			}
+		}
+	}
+
+	return buf
+}
+
+func initializeHandshake() (int, error) {
 	fmt.Printf("Starting RTMP handshake with client %s\n", conn.RemoteAddr().String())
 
 	// Read the first byte (C0) from the client
-	c0_buf := readBytes(conn, 1)
+	c0_buf := readBytes(1)
 	if c0_buf == nil {
 		log.Fatal("Failed to read C0 byte from client")
 		return 0, fmt.Errorf("Failed to read C0 byte from client")
@@ -129,17 +184,17 @@ func initializeHandshake(conn net.Conn) (int, error) {
 		return 0, fmt.Errorf("Invalid handshake byte received: %d", c0_buf[0])
 	}
 
-	c1_buf := readBytes(conn, S1_C1_SIZE) // Junk
+	c1_buf := readBytes(S1_C1_SIZE) // Junk
 	if c1_buf == nil {
 		log.Fatal("Failed to read C1 byte from client")
 		return 0, fmt.Errorf("Failed to read C1 byte from client")
 	}
 
-	sendBytes(conn, []byte{0x03}) // Send S0
-	sendBytes(conn, makeS1())     // Send S1
-	sendBytes(conn, makeS1())     // Send S2
+	sendBytes([]byte{0x03}) // Send S0
+	sendBytes(makeS1())     // Send S1
+	sendBytes(makeS1())     // Send S2
 
-	c2_buf := readBytes(conn, S1_C1_SIZE) // Junk
+	c2_buf := readBytes(S1_C1_SIZE) // Junk
 	if c2_buf == nil {
 		log.Fatal("Failed to read C2 byte from client")
 		return 0, fmt.Errorf("Failed to read C2 byte from client")
@@ -147,19 +202,19 @@ func initializeHandshake(conn net.Conn) (int, error) {
 	return 1, nil
 }
 
-func readBytes(conn net.Conn, numBytes int) []byte {
+func readBytes(numBytes int) []byte {
 	buf := make([]byte, numBytes)
 	_, err := conn.Read(buf)
 	if err != nil {
 		log.Fatal("Error reading from connection:", err)
 		return nil
 	}
-	fmt.Printf("Received from client: %v\n", buf)
+	fmt.Printf("Received from client: % x\n", buf)
 
 	return buf
 }
 
-func sendBytes(conn net.Conn, data []byte) {
+func sendBytes(data []byte) {
 	fmt.Printf("Sending bytes %d \n", len(data))
 	n, err := conn.Write(data)
 	fmt.Printf("Sent %d bytes to client\n", n)
@@ -181,4 +236,85 @@ func makeS1() []byte {
 	rand.Read(s1[8:])
 
 	return s1
+}
+
+func byteSliceToInt(data []byte) uint32 {
+	var res uint32
+	for _, v := range data {
+		res = (res << 8) | uint32(v)
+	}
+
+	return res
+}
+
+func generateRTMPMessage() {
+	// generate chunk header
+
+	// message header
+
+	// payload
+}
+
+func genWindowAckSizeMessage(sizeInBytes int) []byte {
+
+	buf := generateChunkHeader(0, 2, 4, 5, 0)
+	payload := make([]byte, 4)
+	binary.BigEndian.PutUint32(payload, uint32(sizeInBytes))
+
+	buf = append(buf, payload...)
+	fmt.Printf("header % x", buf)
+	return buf
+}
+
+func genPeerBandwidthMessage(bandwidth int, limitType uint8) []byte {
+	/*
+		Limit Types
+		0 (Hard): The client must stop sending if the limit is reached until an acknowledgement is received.
+		1 (Soft): The client can ignore the limit if a previous "Hard" limit was already set to a higher value.
+		2 (Dynamic): This is the most common. It acts as a "Hard" limit if the previous limit was Hard, or a "Soft" limit otherwise.
+	*/
+
+	buf := generateChunkHeader(0, 2, 5, 6, 0)
+	payload := make([]byte, 5)
+	binary.BigEndian.PutUint32(payload[:4], uint32(bandwidth))
+	payload[4] = limitType
+
+	buf = append(buf, payload...)
+	fmt.Printf("[genPeerBandwidthMessage] header % x", buf)
+	return buf
+}
+
+func generateChunkHeader(fmtType uint8, csId int, msgLength int, msgTypeId uint8, msgStreamId int) []byte {
+	// csID of 2 means action command
+	// Chunk header is either 1 2 or 3 byte
+	// TODO: Format this to make it more generic. It only works for payload size of 4 bytes
+	var buf []byte
+	buf = append(buf, (fmtType<<6)|uint8(csId))
+	switch fmtType {
+	case 0:
+		// timestamp 3 bytes
+		// Setting to 0 for now
+
+		// msgLength 3 bytes
+		h := make([]byte, 11)
+		h[3] = uint8(msgLength >> 16)
+		h[4] = uint8(msgLength >> 8)
+		h[5] = uint8(msgLength)
+
+		// msgTypeId 1 byte,
+		h[6] = uint8(msgTypeId)
+
+		// msgStreamId 4 bytes
+		h[7] = uint8(msgStreamId >> 24)
+		h[8] = uint8(msgStreamId >> 16)
+		h[9] = uint8(msgStreamId >> 8)
+		h[10] = uint8(msgStreamId)
+		buf = append(buf, h...)
+	case 1:
+
+	case 2:
+
+	}
+
+	return buf
 }
