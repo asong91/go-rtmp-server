@@ -26,10 +26,9 @@ func parseAMF0(data []byte) {
 		numReadBytes, str := parseAMF0Value(data[readBytes:])
 		readBytes += numReadBytes
 		amfBody += str
-		fmt.Printf("Parsed bytes %d so far out of %d\n", readBytes, len(data))
+		// fmt.Printf("Parsed bytes %d so far out of %d\n", readBytes, len(data))
 	}
 	fmt.Printf("BODY: \n%s", amfBody)
-
 }
 
 // Parses one AMF0 value, returns bytes consumed
@@ -56,16 +55,17 @@ func parseAMF0Value(data []byte) (int, string) {
 }
 
 func parseBoolean(data []byte) (int, string) {
+	// TODO
 	return 0, ""
 }
 
 func parseString(data []byte) (int, string) {
 	// 2 bytes for len of string + len
 	size := binary.BigEndian.Uint16(data[:2])
-	fmt.Printf("\t[parseString]: size % d\n", size)
+	// fmt.Printf("\t[parseString]: size % d\n", size)
 
 	str := string(data[2 : 2+size])
-	fmt.Printf("\t[parseString]: %s\n", str)
+	// fmt.Printf("\t[parseString]: %s\n", str)
 
 	return 2 + int(size), str // type-length-string
 }
@@ -74,7 +74,7 @@ func parseNumber(data []byte) (int, string) {
 	// 8 bytes for the number. Its a float.
 	bits := binary.BigEndian.Uint64(data[:8])
 	num := math.Float64frombits(bits)
-	fmt.Printf("\t[parseNumber]: %f\n", num)
+	// fmt.Printf("\t[parseNumber]: %f\n", num)
 	return 8, strconv.FormatFloat(num, 'f', 15, 64) //type-8 byte number
 }
 
@@ -94,7 +94,7 @@ func parseObject(data []byte) (int, string) {
 		totalReadBytes += 2
 		key := string(data[totalReadBytes : totalReadBytes+keyLen])
 		totalReadBytes += keyLen
-		fmt.Printf("[parseObject]: key = %s\n", key)
+		// fmt.Printf("[parseObject]: key = %s\n", key)
 
 		// Value is a full AMF0 value (type marker + data)
 		numReadBytes, valueStr := parseAMF0Value(data[totalReadBytes:])

@@ -51,19 +51,17 @@ func rtmp() {
 
 func readReq() {
 	for {
-		chunkType := readChunkBasicHeader()
-		readChunkMessageHeader(chunkType)
+		chunk := ReadChunk(conn)
+		switch chunk.ChunkHeader.ChunkMessageHeader.MessageTypeId {
+		case 0x14:
+			parseAMF0(chunk.Payload)
+			buf := genWindowAckSizeMessage(2_500_000)
+			sendBytes(buf)
+			sendBytes(genPeerBandwidthMessage(2_500_000, 2))
+			readBytes(12)
+		}
 	}
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// fmt.Println("----HEADER-----")
-	// fmt.Printf(`\tType: %d\n
-	// 	\tTimestamp:%d\n
-	// 	\tMessageLength: %d\n
-	// 	\tMessageTypeID: %d\n
-	// 	\tMessageStreamID: %d`,
-	// 	msgHeader.Type, msgHeader.Timestamp, msgHeader.MessageLength, msgHeader.MessageTypeID, msgHeader.MessageStreamID)
+
 }
 
 func readChunkBasicHeader() byte {
@@ -93,81 +91,39 @@ func readChunkBasicHeader() byte {
 	return chunkType
 }
 
-func readChunkMessageHeader(chunkType byte) {
-	// var timestamp []byte
-	// var msgLen []byte
-	// var msgTypeId byte
-	// var msgStreamId []byte
+// func readChunkMessageHeader(chunkType byte) {
+// 	// var timestamp []byte
+// 	// var msgLen []byte
+// 	// var msgTypeId byte
+// 	// var msgStreamId []byte
 
-	switch chunkType {
-	case 0x0: // Type 0
-		header := readBytes(11)
-		msgLen, msgTypeId := parseType0Header(header)
-		payload := readMessage(msgLen, 128)
-		switch msgTypeId {
-		case 0x14:
-			parseAMF0(payload)
-			buf := genWindowAckSizeMessage(2_500_000)
-			sendBytes(buf)
-			sendBytes(genPeerBandwidthMessage(2_500_000, 2))
-			readBytes(12)
+// 	switch chunkType {
+// 	case 0x0: // Type 0
+// 		header := readBytes(11)
+// 		msgLen, msgTypeId := parseType0Header(header)
+// 		payload := readMessage(msgLen, 128)
+// 		switch msgTypeId {
+// 		case 0x14:
+// 			parseAMF0(payload)
+// 			buf := genWindowAckSizeMessage(2_500_000)
+// 			sendBytes(buf)
+// 			sendBytes(genPeerBandwidthMessage(2_500_000, 2))
+// 			readBytes(12)
 
-		}
-	case 0x1: // Type 1
-		header := readBytes(7)
-		timestamp := header[0:3]
-		fmt.Printf("message header type 1, % x\n\ttimestamp: % x\n", header, timestamp)
-	case 0x2: // Type 2
-		header := readBytes(3)
-		timestamp := header[0:3]
-		fmt.Printf("message header type 2, % x\n\ttimestamp: % x\n", header, timestamp)
-	case 0x3: // Type 3
-		// TODO: This is some special case
-		fmt.Printf("message header type 3, no chunk message header")
-	}
-}
-
-func parseType0Header(data []byte) (int, byte) {
-	// TODO: Possibly should return back the whole payload
-	timestamp := data[0:3]
-	if timestamp[0] == 0xFF && timestamp[1] == 0xFF && timestamp[2] == 0xFF {
-		fmt.Printf("WARNING: [readChunkMessageHeader] type 0 has extended timestamp")
-	}
-	msgLen := data[3:6]
-	msgTypeId := data[6] // 20 is AMF0 17 is AMF3
-	msgStreamId := data[7:11]
-
-	fmt.Printf("message header type 0, % x\n\ttimestamp: % x\n\tmessage length: % x\n\tmessage type id: % x\n\tmessage steam id: % x\n", data, timestamp, msgLen, msgTypeId, msgStreamId)
-	return int(byteSliceToInt(msgLen)), msgTypeId
-
-}
-
-func readMessage(msgLen int, chunkSize int) []byte {
-	fmt.Printf("[readMessage]: msgLen: %d chunkSize: %d\n", msgLen, chunkSize)
-	buf := make([]byte, 0, msgLen)
-	remaining := msgLen
-
-	for remaining > 0 {
-		toRead := chunkSize
-		if remaining < chunkSize {
-			toRead = remaining
-		}
-
-		chunk := readBytes(toRead)
-		buf = append(buf, chunk...)
-		remaining -= toRead
-
-		// if more data remains, consume the 0xC3 continuation header
-		if remaining > 0 {
-			header := readBytes(1)
-			if header[0] != 0xC3 {
-				fmt.Printf("WARNING: expected 0xC3 continuation header, got %02x\n", header[0])
-			}
-		}
-	}
-
-	return buf
-}
+// 		}
+// 	case 0x1: // Type 1
+// 		header := readBytes(7)
+// 		timestamp := header[0:3]
+// 		fmt.Printf("message header type 1, % x\n\ttimestamp: % x\n", header, timestamp)
+// 	case 0x2: // Type 2
+// 		header := readBytes(3)
+// 		timestamp := header[0:3]
+// 		fmt.Printf("message header type 2, % x\n\ttimestamp: % x\n", header, timestamp)
+// 	case 0x3: // Type 3
+// 		// TODO: This is some special case
+// 		fmt.Printf("message header type 3, no chunk message header")
+// 	}
+// }
 
 func initializeHandshake() (int, error) {
 	fmt.Printf("Starting RTMP handshake with client %s\n", conn.RemoteAddr().String())
