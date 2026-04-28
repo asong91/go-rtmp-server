@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"time"
 )
 
 const ChunkSize = 128
@@ -33,20 +34,20 @@ type ChunkMessageHeader struct {
 
 type ChunkBasicHeader struct {
 	Fmt           uint8  // only 2 bits
-	ChunkStreamID uint32 // at least 6 bits can be up to 6bits + 2 bytes. 22 bits
+	ChunkStreamId uint32 // at least 6 bits can be up to 6bits + 2 bytes. 22 bits
 }
 
 func ReadChunk(r io.Reader) Chunk {
-	header := NewChunkHeader(r)
+	header := ReadChunkHeader(r)
 	return Chunk{ChunkHeader: header, Payload: readMessage(int(header.ChunkMessageHeader.MessageLength), 128)}
 }
 
-func NewChunkHeader(r io.Reader) ChunkHeader {
-	chunkBasicHeader := NewChunkBasicHeader(r)
-	return ChunkHeader{ChunkBasicHeader: chunkBasicHeader, ChunkMessageHeader: NewChunkMessagerHeader(r, chunkBasicHeader)}
+func ReadChunkHeader(r io.Reader) ChunkHeader {
+	chunkBasicHeader := ReadChunkBasicHeader(r)
+	return ChunkHeader{ChunkBasicHeader: chunkBasicHeader, ChunkMessageHeader: ReadChunkMessagerHeader(r, chunkBasicHeader)}
 }
 
-func NewChunkBasicHeader(r io.Reader) ChunkBasicHeader {
+func ReadChunkBasicHeader(r io.Reader) ChunkBasicHeader {
 	/*
 		First byte is fmt(2 bits) + cs-id (6 bits)
 		0 1 2 3 4 5 6 7
@@ -82,10 +83,10 @@ func NewChunkBasicHeader(r io.Reader) ChunkBasicHeader {
 	fmt.Printf("Chunk Type, % x\n", chunkType)
 	// cbh.Fmt = uint8(chunkType)
 	// cbh.ChunkStreamID = uint32(csId)
-	return ChunkBasicHeader{Fmt: uint8(chunkType), ChunkStreamID: uint32(csId)}
+	return ChunkBasicHeader{Fmt: uint8(chunkType), ChunkStreamId: uint32(csId)}
 }
 
-func NewChunkMessagerHeader(r io.Reader, cbh ChunkBasicHeader) ChunkMessageHeader {
+func ReadChunkMessagerHeader(r io.Reader, cbh ChunkBasicHeader) ChunkMessageHeader {
 	chunkMessageHeader := ChunkMessageHeader{}
 	switch cbh.Fmt {
 	case 0x0: // Type 0
@@ -138,11 +139,25 @@ func readNumBytes(r io.Reader, numBytes int) []byte {
 func (ch ChunkHeader) Print() {
 	fmt.Printf("=== Chunk Header ===\n")
 	fmt.Printf("Fmt:             %d\n", ch.ChunkBasicHeader.Fmt)
-	fmt.Printf("ChunkStreamID:   %d\n", ch.ChunkBasicHeader.ChunkStreamID)
+	fmt.Printf("ChunkStreamID:   %d\n", ch.ChunkBasicHeader.ChunkStreamId)
 	fmt.Printf("Timestamp:       %d\n", ch.ChunkMessageHeader.Timestamp)
 	fmt.Printf("MessageLength:   %d\n", ch.ChunkMessageHeader.MessageLength)
 	fmt.Printf("MessageTypeId:   %d\n", ch.ChunkMessageHeader.MessageTypeId)
 	fmt.Printf("MessageStreamId: %d\n", ch.ChunkMessageHeader.MessageStreamId)
+}
+
+func (c *Chunk) Print() {
+	fmt.Printf("=== Chunk Request ===\n")
+	fmt.Printf("=== Chunk Header ===\n")
+	fmt.Printf("Fmt:             %d\n", c.ChunkHeader.ChunkBasicHeader.Fmt)
+	fmt.Printf("ChunkStreamID:   %d\n", c.ChunkHeader.ChunkBasicHeader.ChunkStreamId)
+	fmt.Printf("Timestamp:       %d\n", c.ChunkHeader.ChunkMessageHeader.Timestamp)
+	fmt.Printf("MessageLength:   %d\n", c.ChunkHeader.ChunkMessageHeader.MessageLength)
+	fmt.Printf("MessageTypeId:   %d\n", c.ChunkHeader.ChunkMessageHeader.MessageTypeId)
+	fmt.Printf("MessageStreamId: %d\n", c.ChunkHeader.ChunkMessageHeader.MessageStreamId)
+	fmt.Printf("=== Payload ===\n")
+	fmt.Printf("Payload (% x): %v\n", c.Payload, c.Payload)
+	fmt.Printf("PayloadLength:  %d\n", len(c.Payload))
 }
 
 func readMessage(msgLen int, chunkSize int) []byte {
@@ -170,4 +185,195 @@ func readMessage(msgLen int, chunkSize int) []byte {
 	}
 
 	return buf
+}
+
+func genProtocolControlMessage(msgTypeId uint8, payload int) Chunk {
+	/*
+		// TODO: Change this to Enum
+		Message Type Can Be
+		1 - Set Chunk Size
+		2 - Abort Message
+		3 - Acknowledgement
+		4 - User Control
+		5 - Window Acknowledgement Size
+		6-  Set Peer Bandwidth
+
+		Limit Type can be
+		0 - Hard: The peer SHOULD limit its output bandwidth to the indicated window size.
+		1 - Soft: The peer SHOULD limit its output bandwidth to the the window indicated in this message or the limit already in effect, whichever is smaller.
+		2 - Dynamic: If the previous Limit Type was Hard, treat this message as though it was marked Hard, otherwise ignore this message.
+	*/
+
+	chunkBasicHeader := ChunkBasicHeader{Fmt: 0, ChunkStreamId: 2} // This is always 0 and 2
+	chunkMessageHeader := ChunkMessageHeader{MessageStreamId: 0, MessageTypeId: msgTypeId, Timestamp: 0}
+	var chunk Chunk
+
+	switch msgTypeId {
+	case 1:
+		// 32 bits. bit 0 is 0 and 31 bits is the chunk size
+		buf := make([]byte, 4)
+		binary.BigEndian.PutUint32(buf, uint32(payload)&0x7FFFFFFF)
+		chunk.Payload = buf
+	case 2:
+		// 32 bits. Chunk Stream Id
+		buf := make([]byte, 4)
+		binary.BigEndian.PutUint32(buf, uint32(payload))
+		chunk.Payload = buf
+	case 3:
+		// 32 bits. 4 bytes
+		buf := make([]byte, 4)
+		binary.BigEndian.PutUint32(buf, uint32(payload))
+		chunk.Payload = buf
+	case 4:
+		// 2 bytes event type. 4 bytes? Event data?
+		// handled in genUserControlMessage()
+	case 5:
+		// 32 bits. 4 bytes
+		buf := make([]byte, 4)
+		binary.BigEndian.PutUint32(buf, uint32(payload))
+		chunk.Payload = buf
+	case 6:
+		// 40 bits. 5 bytes
+		// Ack Window Size 4bytes + Limit Type 1byte
+		buf := make([]byte, 5)
+		binary.BigEndian.PutUint32(buf[:4], uint32(payload))
+		buf[4] = 2
+		chunk.Payload = buf
+	}
+
+	chunkHeader := ChunkHeader{ChunkBasicHeader: chunkBasicHeader, ChunkMessageHeader: chunkMessageHeader}
+	chunk.ChunkHeader = chunkHeader
+	return chunk
+}
+
+func genUserControlMessage(eventTypeId uint8, streamId int, bufferLen int) Chunk {
+
+	chunkBasicHeader := ChunkBasicHeader{Fmt: 0, ChunkStreamId: 2} // This is always 0 and 2
+	chunkMessageHeader := ChunkMessageHeader{MessageStreamId: 0, MessageTypeId: 4, Timestamp: 0}
+	var chunk Chunk
+
+	var buf []byte
+
+	switch eventTypeId {
+	case 0, 1, 2, 4:
+		// Stream Begin, Stream EOF, Stream Dry - 6 bytes
+		buf = make([]byte, 6)
+		binary.BigEndian.PutUint16(buf[0:2], uint16(eventTypeId))
+		binary.BigEndian.PutUint32(buf[2:6], uint32(streamId))
+		chunk.Payload = buf
+
+	case 3:
+		// SetBufferLength - 10 bytes (event type + stream ID + buffer length)
+		buf = make([]byte, 10)
+		binary.BigEndian.PutUint16(buf[0:2], uint16(eventTypeId))
+		binary.BigEndian.PutUint32(buf[2:6], uint32(streamId))
+		binary.BigEndian.PutUint32(buf[6:10], uint32(bufferLen))
+		chunk.Payload = buf
+
+	case 6, 7:
+		// Ping Request, Ping Response - 6 bytes (event type + timestamp)
+		buf = make([]byte, 6)
+		binary.BigEndian.PutUint16(buf[0:2], uint16(eventTypeId))
+		timestamp := uint32(time.Now().UnixMilli())
+		binary.BigEndian.PutUint32(buf[2:6], timestamp)
+		chunk.Payload = buf
+	}
+	chunkHeader := ChunkHeader{ChunkBasicHeader: chunkBasicHeader, ChunkMessageHeader: chunkMessageHeader}
+	chunk.ChunkHeader = chunkHeader
+	return chunk
+}
+
+func (c *Chunk) Send(w io.Writer) error {
+	// Set message length based on payload size
+	c.ChunkHeader.ChunkMessageHeader.MessageLength = uint32(len(c.Payload))
+	fmt.Println("SENDING CHUNK")
+	c.Print()
+
+	// Create a buffer to hold all serialized data
+	buf := make([]byte, 0)
+
+	// Serialize the basic header
+	basicHeader := c.serializeBasicHeaderBuffer()
+	buf = append(buf, basicHeader...)
+
+	// Serialize the message header
+	messageHeader := c.serializeMessageHeaderBuffer()
+	buf = append(buf, messageHeader...)
+
+	// Append the payload
+	buf = append(buf, c.Payload...)
+
+	// Write everything at once
+	_, err := w.Write(buf)
+	return err
+}
+
+func (c *Chunk) serializeBasicHeaderBuffer() []byte {
+	cbh := c.ChunkHeader.ChunkBasicHeader
+	csID := cbh.ChunkStreamId
+
+	var header []byte
+
+	if csID < 64 {
+		header = []byte{(cbh.Fmt << 6) | uint8(csID)}
+	} else if csID < 320 {
+		header = make([]byte, 2)
+		header[0] = cbh.Fmt << 6
+		header[1] = uint8(csID - 64)
+	} else {
+		header = make([]byte, 3)
+		header[0] = (cbh.Fmt << 6) | 1
+		id := csID - 64
+		header[1] = uint8(id & 0xFF)
+		header[2] = uint8((id >> 8) & 0xFF)
+	}
+
+	return header
+}
+
+func (c *Chunk) serializeMessageHeaderBuffer() []byte {
+	cmh := c.ChunkHeader.ChunkMessageHeader
+	fmt := c.ChunkHeader.ChunkBasicHeader.Fmt
+
+	switch fmt {
+	case 0:
+		header := make([]byte, 11)
+		ts := cmh.Timestamp
+		header[0] = uint8((ts >> 16) & 0xFF)
+		header[1] = uint8((ts >> 8) & 0xFF)
+		header[2] = uint8(ts & 0xFF)
+		len := cmh.MessageLength
+		header[3] = uint8((len >> 16) & 0xFF)
+		header[4] = uint8((len >> 8) & 0xFF)
+		header[5] = uint8(len & 0xFF)
+		header[6] = cmh.MessageTypeId
+		binary.BigEndian.PutUint32(header[7:11], cmh.MessageStreamId)
+		return header
+
+	case 1:
+		header := make([]byte, 7)
+		ts := cmh.Timestamp
+		header[0] = uint8((ts >> 16) & 0xFF)
+		header[1] = uint8((ts >> 8) & 0xFF)
+		header[2] = uint8(ts & 0xFF)
+		len := cmh.MessageLength
+		header[3] = uint8((len >> 16) & 0xFF)
+		header[4] = uint8((len >> 8) & 0xFF)
+		header[5] = uint8(len & 0xFF)
+		header[6] = cmh.MessageTypeId
+		return header
+
+	case 2:
+		header := make([]byte, 3)
+		ts := cmh.Timestamp
+		header[0] = uint8((ts >> 16) & 0xFF)
+		header[1] = uint8((ts >> 8) & 0xFF)
+		header[2] = uint8(ts & 0xFF)
+		return header
+
+	case 3:
+		return []byte{}
+	}
+
+	return []byte{}
 }
