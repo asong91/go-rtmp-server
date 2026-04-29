@@ -237,7 +237,7 @@ func genProtocolControlMessage(msgTypeId uint8, payload int) Chunk {
 		// Ack Window Size 4bytes + Limit Type 1byte
 		buf := make([]byte, 5)
 		binary.BigEndian.PutUint32(buf[:4], uint32(payload))
-		buf[4] = 2
+		buf[4] = 2 // Limit type. FFMPEG is always 2
 		chunk.Payload = buf
 	}
 
@@ -281,6 +281,16 @@ func genUserControlMessage(eventTypeId uint8, streamId int, bufferLen int) Chunk
 	chunkHeader := ChunkHeader{ChunkBasicHeader: chunkBasicHeader, ChunkMessageHeader: chunkMessageHeader}
 	chunk.ChunkHeader = chunkHeader
 	return chunk
+}
+
+func sendAMF0Message(amf0Message *AMF0Payload, w io.Writer) {
+	chunkBasicHeader := ChunkBasicHeader{Fmt: 0, ChunkStreamId: 3} // TODO: This 3 might change
+	chunkMessageHeader := ChunkMessageHeader{Timestamp: 0, MessageTypeId: 20, MessageStreamId: 0}
+	chunkHeader := ChunkHeader{ChunkBasicHeader: chunkBasicHeader, ChunkMessageHeader: chunkMessageHeader}
+	chunk := Chunk{ChunkHeader: chunkHeader, Payload: amf0Message.buf}
+
+	chunk.Send(w)
+
 }
 
 func (c *Chunk) Send(w io.Writer) error {

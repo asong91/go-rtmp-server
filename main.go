@@ -51,6 +51,7 @@ func rtmp() {
 
 func readReq() {
 	for {
+		fmt.Println("reading chunk")
 		chunk := ReadChunk(conn)
 		switch chunk.ChunkHeader.ChunkMessageHeader.MessageTypeId {
 		case 0x14:
@@ -63,8 +64,10 @@ func readReq() {
 			beginMsg.Send(conn)
 			chunkSize := genProtocolControlMessage(1, 4096)
 			chunkSize.Send(conn)
+			sendAMF0Message(genConnectSuccess(1.0), conn)
+			fmt.Println("sending amf0Res")
 
-			readBytes(12)
+			// readBytes(12)
 		}
 	}
 
