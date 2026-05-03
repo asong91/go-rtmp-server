@@ -13,6 +13,7 @@ import (
 const S1_C1_SIZE = 1536
 
 var conn net.Conn
+var chunkSize = 128 // default
 
 func main() {
 	slog.SetLogLoggerLevel(slog.LevelDebug)
@@ -51,23 +52,63 @@ func rtmp() {
 
 func readReq() {
 	for {
-		fmt.Println("reading chunk")
 		chunk := ReadChunk(conn)
+		chunk.Print()
+		// chunk.Print() // Waits for the user to press the Enter key
+		// fmt.Scanln()
 		switch chunk.ChunkHeader.ChunkMessageHeader.MessageTypeId {
-		case 0x14:
-			parseAMF0(chunk.Payload)
-			windowAckMsg := genProtocolControlMessage(5, 2_500_000)
-			windowAckMsg.Send(conn)
-			peerBandMsg := genProtocolControlMessage(6, 2_500_000)
-			peerBandMsg.Send(conn)
-			beginMsg := genUserControlMessage(0, 0, 0)
-			beginMsg.Send(conn)
-			chunkSize := genProtocolControlMessage(1, 4096)
-			chunkSize.Send(conn)
-			sendAMF0Message(genConnectSuccess(1.0), conn)
-			fmt.Println("sending amf0Res")
+		case 0x01:
+			chunkSize = chunk.readChunkSizeMessage()
+		case 0x12: // 18 Data Message
+			fmt.Printf(parseAMF0(chunk.Payload))
+			fmt.Scanln()
+		case 0x14: // 20 Command Message
+			cmd, _ := parseAMF0Command(chunk.Payload)
+			cmd.Print()
+			switch cmd.Name {
+			case "connect":
+				windowAckMsg := genProtocolControlMessage(5, 2_500_000)
+				windowAckMsg.Send(conn)
+				peerBandMsg := genProtocolControlMessage(6, 2_500_000)
+				peerBandMsg.Send(conn)
+				beginMsg := genUserControlMessage(0, 0, 0)
+				beginMsg.Send(conn)
+				chunkSize := genProtocolControlMessage(1, 4096)
+				chunkSize.Send(conn)
+				sendAMF0Message(genConnectSuccess(1.0), conn)
+			case "releaseStream":
+				sendAMF0Message(SerializeAMF0(
+					"_result",
+					cmd.SeqNum,
+					nil,
+				), conn)
+			case "FCPublish":
+				sendAMF0Message(SerializeAMF0(
+					"onFCPublish",
+					0.0,
+					nil,
+				), conn)
+			case "createStream":
+				sendAMF0Message(SerializeAMF0(
+					"_result",
+					cmd.SeqNum,
+					nil,
+					1.0), conn)
+			case "publish":
+				streamBeginMsg := genUserControlMessage(0, 1, 0)
+				streamBeginMsg.Send(conn)
+				sendAMF0Message(SerializeAMF0(
+					"onStatus",
+					0.0,
+					nil,
+					[]AMF0Field{
+						{"level", "status"},
+						{"code", "NetStream.Publish.Start"},
+						{"description", "Stream is now published."},
+					},
+				), conn)
+			}
 
-			// readBytes(12)
 		}
 	}
 
@@ -174,7 +215,6 @@ func readBytes(numBytes int) []byte {
 		log.Fatal("Error reading from connection:", err)
 		return nil
 	}
-	fmt.Printf("Received from client: % x\n", buf)
 
 	return buf
 }

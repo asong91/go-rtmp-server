@@ -18,88 +18,102 @@ const (
 	AMF0ObjectEnd    = 0x09
 )
 
-type AMF0Payload struct {
-	buf []byte
+type AMF0Command struct {
+	Name   string
+	SeqNum float64
+	Args   []any
 }
 
+// for objects within commands
 type AMF0Field struct {
 	Key   string
 	Value any
 }
 
-func (a *AMF0Payload) WriteString(s string) {
-	a.buf = append(a.buf, 0x02)
-	length := uint16(len(s))
-	a.buf = append(a.buf, byte(length>>8), byte(length))
-	a.buf = append(a.buf, []byte(s)...)
-}
-
-func (a *AMF0Payload) WriteNumber(n float64) {
-	a.buf = append(a.buf, 0x00)
-	bits := math.Float64bits(n)
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, bits)
-	a.buf = append(a.buf, b...)
-}
-
-func (a *AMF0Payload) WriteBoolean(b bool) {
-	a.buf = append(a.buf, 0x01)
-	if b == false {
-		a.buf = append(a.buf, 0x00)
-	} else {
-		a.buf = append(a.buf, 0x01)
+func SerializeAMF0(values ...any) []byte {
+	buf := []byte{}
+	for _, v := range values {
+		buf = append(buf, serializeAMF0Value(v)...)
 	}
+	return buf
 }
 
-func (a *AMF0Payload) WriteNull() {
-	a.buf = append(a.buf, 0x05)
-}
-
-func (a *AMF0Payload) WriteObject(fields []AMF0Field) {
-	a.buf = append(a.buf, 0x03)
-
-	for _, f := range fields {
-		a.WriteFieldName(f.Key)
-		switch v := f.Value.(type) {
-		case string:
-			a.WriteString(v)
-		case float64:
-			a.WriteNumber(v)
-		case int:
-			a.WriteNumber(float64(v))
-		case bool:
-			a.WriteBoolean(v)
-		case nil:
-			a.WriteNull()
+func serializeAMF0Value(v any) []byte {
+	buf := []byte{}
+	switch val := v.(type) {
+	case string:
+		buf = append(buf, 0x02)
+		length := uint16(len(val))
+		buf = append(buf, byte(length>>8), byte(length))
+		buf = append(buf, []byte(val)...)
+	case float64:
+		buf = append(buf, 0x00)
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint64(b, math.Float64bits(val))
+		buf = append(buf, b...)
+	case int:
+		buf = append(buf, 0x00)
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint64(b, math.Float64bits(float64(val)))
+		buf = append(buf, b...)
+	case bool:
+		buf = append(buf, 0x01)
+		if val {
+			buf = append(buf, 0x01)
+		} else {
+			buf = append(buf, 0x00)
 		}
+	case nil:
+		buf = append(buf, 0x05)
+	case []AMF0Field:
+		buf = append(buf, 0x03)
+		for _, f := range val {
+			length := uint16(len(f.Key))
+			buf = append(buf, byte(length>>8), byte(length))
+			buf = append(buf, []byte(f.Key)...)
+			buf = append(buf, serializeAMF0Value(f.Value)...)
+		}
+		buf = append(buf, 0x00, 0x00, 0x09)
 	}
-	// empty string key + object-end marker
-	a.buf = append(a.buf, 0x00, 0x00, 0x09)
+	return buf
 }
 
-func (a *AMF0Payload) WriteFieldName(name string) {
-	// field names inside objects have NO type marker, just length-prefixed string
-	length := uint16(len(name))
-	a.buf = append(a.buf, byte(length>>8), byte(length))
-	a.buf = append(a.buf, []byte(name)...)
+func genConnectSuccess(seqnum float64) []byte {
+	return SerializeAMF0(
+		"_result",
+		seqnum,
+		[]AMF0Field{
+			{"fmsVer", "FMS/3,0,1,123"},
+			{"capabilities", 31},
+		},
+		[]AMF0Field{
+			{"level", "status"},
+			{"code", "NetConnection.Connect.Success"},
+			{"description", "Connection succeeded."},
+			{"objectEncoding", 0},
+		},
+	)
 }
 
-func genConnectSuccess(clientId float64) *AMF0Payload {
-	payload := &AMF0Payload{}
-	payload.WriteString("_result")
-	payload.WriteNumber(clientId)
-	payload.WriteObject([]AMF0Field{
-		{"fmsVer", "FMS/3,0,1,123"},
-		{"capabilities", 31},
-	})
-	payload.WriteObject([]AMF0Field{
-		{"level", "status"},
-		{"code", "NetConnection.Connect.Success"},
-		{"description", "Connection succeeded."},
-		{"objectEncoding", 0},
-	})
+func parseAMF0Command(data []byte) (*AMF0Command, error) {
+	cmd := &AMF0Command{}
+	offset := 0
 
-	return payload
+	n, name := parseString(data[offset+1:]) // skip 0x02 type marker
+	cmd.Name = name
+	offset += 1 + n
+
+	n, seqStr := parseNumber(data[offset+1:]) // skip 0x00 type marker
+	cmd.SeqNum, _ = strconv.ParseFloat(seqStr, 64)
+	offset += 1 + n
+
+	for offset < len(data) {
+		n, val := parseAMF0Value(data[offset:])
+		cmd.Args = append(cmd.Args, val)
+		offset += n
+	}
+
+	return cmd, nil
 }
 
 // Loops until the whole chunk is consumed
@@ -133,58 +147,91 @@ func parseAMF0Value(data []byte) (int, string) {
 		consumed, str = parseString(data[readBytes:])
 	case AMF0Object:
 		consumed, str = parseObject(data[readBytes:])
+	case AMF0ECMAArray:
+		consumed, str = parseEMCAArray(data[readBytes:])
 	}
 	readBytes += consumed
 	return readBytes, str + "\n"
 }
 
+func parseEMCAArray(data []byte) (int, string) {
+	totalReadBytes := 0
+	// 4 byte count (number of elements, can be ignored)
+	totalReadBytes += 4
+
+	str := "[\n"
+	for {
+		// check for object end marker 00 00 09
+		if data[totalReadBytes] == 0x00 && data[totalReadBytes+1] == 0x00 && data[totalReadBytes+2] == 0x09 {
+			totalReadBytes += 3
+			break
+		}
+
+		keyLen := int(binary.BigEndian.Uint16(data[totalReadBytes : totalReadBytes+2]))
+		totalReadBytes += 2
+		key := string(data[totalReadBytes : totalReadBytes+keyLen])
+		totalReadBytes += keyLen
+
+		numReadBytes, valueStr := parseAMF0Value(data[totalReadBytes:])
+		totalReadBytes += numReadBytes
+		str += "\t" + key + ": " + valueStr
+	}
+
+	return totalReadBytes, str + "]"
+}
+
 func parseBoolean(data []byte) (int, string) {
-	// TODO
-	return 0, ""
+	if data[0] == 0x01 {
+		return 1, "true"
+	}
+	return 1, "false"
 }
 
 func parseString(data []byte) (int, string) {
-	// 2 bytes for len of string + len
 	size := binary.BigEndian.Uint16(data[:2])
-	// fmt.Printf("\t[parseString]: size % d\n", size)
-
 	str := string(data[2 : 2+size])
-	// fmt.Printf("\t[parseString]: %s\n", str)
-
-	return 2 + int(size), str // type-length-string
+	fmt.Print(str + "\n")
+	return 2 + int(size), str
 }
 
 func parseNumber(data []byte) (int, string) {
-	// 8 bytes for the number. Its a float.
 	bits := binary.BigEndian.Uint64(data[:8])
 	num := math.Float64frombits(bits)
-	// fmt.Printf("\t[parseNumber]: %f\n", num)
-	return 8, strconv.FormatFloat(num, 'f', 15, 64) //type-8 byte number
+	return 8, strconv.FormatFloat(num, 'f', 15, 64)
 }
 
 func parseObject(data []byte) (int, string) {
 	totalReadBytes := 0
 	str := "{\n"
 	for {
-		// Check for object end marker: 00 00 09
-		// fmt.Printf("%x %x %x", data[readBytes], data[readBytes+1], data[readBytes+2])
 		if data[totalReadBytes] == 0x00 && data[totalReadBytes+1] == 0x00 && data[totalReadBytes+2] == 0x09 {
 			totalReadBytes += 3
 			break
 		}
 
-		// Key is always a raw string (no type marker)
 		keyLen := int(binary.BigEndian.Uint16(data[totalReadBytes : totalReadBytes+2]))
 		totalReadBytes += 2
 		key := string(data[totalReadBytes : totalReadBytes+keyLen])
 		totalReadBytes += keyLen
-		// fmt.Printf("[parseObject]: key = %s\n", key)
 
-		// Value is a full AMF0 value (type marker + data)
 		numReadBytes, valueStr := parseAMF0Value(data[totalReadBytes:])
 		totalReadBytes += numReadBytes
 		str += "\t" + key + ": " + valueStr
 	}
 
 	return totalReadBytes, str + "}"
+}
+
+func (a *AMF0Command) Print() {
+	fmt.Printf("\t=== AMF0 Command ===\n")
+	fmt.Printf("\tName:     %s\n", a.Name)
+	fmt.Printf("\tSeqNum:   %f\n", a.SeqNum)
+	for _, v := range a.Args {
+		switch val := v.(type) {
+		case AMF0Field:
+			fmt.Printf("\t\t%s: %v", val.Key, val.Value)
+		default:
+			fmt.Printf("\t%v\n", v)
+		}
+	}
 }
