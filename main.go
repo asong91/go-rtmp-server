@@ -59,6 +59,10 @@ func readReq() {
 		switch chunk.ChunkHeader.ChunkMessageHeader.MessageTypeId {
 		case 0x01:
 			chunkSize = chunk.readChunkSizeMessage()
+		case 0x08: // Audio
+			fmt.Printf("TODO: Parse Audio")
+		case 0x09: // Video
+			parseVideoPacket(chunk.Payload)
 		case 0x12: // 18 Data Message
 			fmt.Printf(parseAMF0(chunk.Payload))
 			fmt.Scanln()
