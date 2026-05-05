@@ -97,10 +97,20 @@ func ReadChunkMessagerHeader(r io.Reader, cbh ChunkBasicHeader) ChunkMessageHead
 	case 0x1: // Type 1
 		header := readNumBytes(r, 7)
 		chunkMessageHeader.parseHeaderType(1, header)
+		// inherit stream ID from previous
+		if prev, exists := previousChunkHeaders[cbh.ChunkStreamId]; exists {
+			chunkMessageHeader.MessageStreamId = prev.MessageStreamId
+		}
 		previousChunkHeaders[cbh.ChunkStreamId] = chunkMessageHeader
 	case 0x2: // Type 2
 		header := readNumBytes(r, 3)
 		chunkMessageHeader.parseHeaderType(2, header)
+		// inherit message length, type, and stream ID from previous
+		if prev, exists := previousChunkHeaders[cbh.ChunkStreamId]; exists {
+			chunkMessageHeader.MessageLength = prev.MessageLength
+			chunkMessageHeader.MessageTypeId = prev.MessageTypeId
+			chunkMessageHeader.MessageStreamId = prev.MessageStreamId
+		}
 		previousChunkHeaders[cbh.ChunkStreamId] = chunkMessageHeader
 	case 0x3: // Type 3
 		if prev, exists := previousChunkHeaders[cbh.ChunkStreamId]; exists {

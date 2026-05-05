@@ -1,10 +1,23 @@
 package main
 
-import "fmt"
+import (
+	"encoding/binary"
+	"fmt"
+)
 
-func parseVideoPacket(payload []byte) {
+type AVCDecoderConfigurationRecord struct {
+	ConfigurationVersion  uint8
+	AVCProfileIndication  uint8
+	ProfileCompatability  uint8
+	AVCLevelIndication    uint8
+	LengthSizeMinusOne    uint8
+	SequenceParameterSets [][]byte
+	PictureParameterSets  [][]byte
+}
+
+func parseVideoPacket(data []byte) {
 	readerBytePointer := 0
-	firstByte := payload[readerBytePointer]
+	firstByte := data[readerBytePointer]
 	readerBytePointer++
 	frameType := firstByte >> 4 // 4 LMB
 	codecId := firstByte & 0x0F // 4 RMB
@@ -13,19 +26,60 @@ func parseVideoPacket(payload []byte) {
 
 	switch codecId {
 	case 7: // AVC
-		avcPacketType := payload[readerBytePointer]
+		avcPacketType := data[readerBytePointer]
 		readerBytePointer++
 		switch avcPacketType {
 		case 0: // AVC Sequence Header
-			compositionTime := payload[readerBytePointer:3]
-			fmt.Printf("Composition Time: %d\n", compositionTime)
+			// compositionTime := data[readerBytePointer:3]
+			readerBytePointer += 3
+			parseAVCDecoderConfigurationRecord(data[readerBytePointer:])
+			// aRec.Print()
+			// fmt.Printf("Composition Time: %d\n", composition?Time)
 		}
 	}
+}
 
-	// TODO: Figure out what AVCDecoderConfigurationRecord is
-	// Payload (
-	// 17 // type codec
-	// 00  // avc packet type
-	// 00 00 00 // composition time
-	// 01 42 c0 1e ff e1 00 19 67 42 c0 1e d9 01 e0 8f eb 01 10 00 00 03 00 10 00 00 03 03 c0 f1 62 e4 80 01 00 04 68 cb 8c b2): [23 0 0 0 0 1 66 192 30 255 225 0 25 103 66 192 30 217 1 224 143 235 1 16 0 0 3 0 16 0 0 3 3 192 241 98 228 128 1 0 4 104 203 140 178]
+func (r AVCDecoderConfigurationRecord) Print() {
+	fmt.Printf("=== AVCDecoderConfigurationRecord ===\n")
+	fmt.Printf("ConfigurationVersion: %d\n", r.ConfigurationVersion)
+	fmt.Printf("AVCProfileIndication: %d\n", r.AVCProfileIndication)
+	fmt.Printf("ProfileCompatibility: %d\n", r.ProfileCompatability)
+	fmt.Printf("AVCLevelIndication:   %d\n", r.AVCLevelIndication)
+	fmt.Printf("LengthSizeMinusOne:   %d\n", r.LengthSizeMinusOne)
+	fmt.Printf("SPS count: %d\n", len(r.SequenceParameterSets))
+	for i, sps := range r.SequenceParameterSets {
+		fmt.Printf("  SPS[%d]: % x\n", i, sps)
+	}
+	fmt.Printf("PPS count: %d\n", len(r.PictureParameterSets))
+	for i, pps := range r.PictureParameterSets {
+		fmt.Printf("  PPS[%d]: % x\n", i, pps)
+	}
+}
+
+func parseAVCDecoderConfigurationRecord(data []byte) AVCDecoderConfigurationRecord {
+	r := AVCDecoderConfigurationRecord{}
+	r.ConfigurationVersion = data[0]
+	r.AVCProfileIndication = data[1]
+	r.ProfileCompatability = data[2]
+	r.AVCLevelIndication = data[3]
+	r.LengthSizeMinusOne = data[4] & 0x03
+
+	numSps := data[5] & 0x1F
+	offset := 6
+	for i := 0; i < int(numSps); i++ {
+		spsLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+		offset += 2
+		r.SequenceParameterSets = append(r.SequenceParameterSets, data[offset:offset+spsLen])
+		offset += spsLen
+	}
+	numPPS := data[offset]
+	offset++
+	for i := 0; i < int(numPPS); i++ {
+		ppsLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+		offset += 2
+		r.PictureParameterSets = append(r.PictureParameterSets, data[offset:offset+ppsLen])
+		offset += ppsLen
+	}
+
+	return r
 }
