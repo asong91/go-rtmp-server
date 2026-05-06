@@ -71,17 +71,17 @@ func ReadChunkBasicHeader(r io.Reader) ChunkBasicHeader {
 	case 0:
 		csIdByte := readNumBytes(r, 1)
 		csId = int(csIdByte[0]) + 64
-		fmt.Printf("cs id type 0, % x\n", csId)
+		// fmt.Printf("cs id type 0, % x\n", csId)
 	case 1:
 		csIdByte := readNumBytes(r, 2)
 		csId = int(csIdByte[1])*256 + int(csIdByte[0]) + 64
-		fmt.Printf("cs id type 1, % x\n", csId)
+		// fmt.Printf("cs id type 1, % x\n", csId)
 	default:
 		csId = int(csIdType)
-		fmt.Printf("cs id type 2, % x\n", csId)
+		// fmt.Printf("cs id type 2, % x\n", csId)
 	}
 
-	fmt.Printf("Chunk Fmt Type, % x\n", chunkType)
+	// fmt.Printf("Chunk Fmt Type, % x\n", chunkType)
 	// cbh.Fmt = uint8(chunkType)
 	// cbh.ChunkStreamID = uint32(csId)
 	return ChunkBasicHeader{Fmt: uint8(chunkType), ChunkStreamId: uint32(csId)}

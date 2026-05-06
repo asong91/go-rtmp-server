@@ -7,6 +7,7 @@ import (
 	"log"
 	"log/slog"
 	"net"
+	"os"
 	"time"
 )
 
@@ -14,6 +15,14 @@ const S1_C1_SIZE = 1536
 
 var conn net.Conn
 var chunkSize = 128 // default
+
+type StreamIdMapping struct {
+	AudioSeqHeader *Chunk
+	VideoSeqHeader *Chunk
+	FileName       string
+}
+
+var streamAudVidHeaders = make(map[uint32]*StreamIdMapping)
 
 func main() {
 	slog.SetLogLoggerLevel(slog.LevelDebug)
@@ -53,7 +62,7 @@ func rtmp() {
 func readReq() {
 	for {
 		chunk := ReadChunk(conn)
-		chunk.Print()
+		// chunk.Print()
 		// chunk.Print() // Waits for the user to press the Enter key
 		// fmt.Scanln()
 		switch chunk.ChunkHeader.ChunkMessageHeader.MessageTypeId {
@@ -61,16 +70,20 @@ func readReq() {
 			chunkSize = chunk.readChunkSizeMessage()
 		case 0x08: // Audio
 			packetType := chunk.Payload[1]
+			msgStreamId := chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId
 			if packetType == 0 {
 				// AAC Sequence Header
+				storeSeqHeader(msgStreamId, true, chunk)
 			} else if packetType == 1 {
 				// AAC Raw
 			}
 			// parseAudioPacket(chunk.Payload)
 		case 0x09: // Video
 			packetType := chunk.Payload[1]
+			msgStreamId := chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId
 			if packetType == 0 {
 				// AVC Sequence Header
+				storeSeqHeader(msgStreamId, false, chunk)
 			} else if packetType == 1 {
 				// AVC NALU
 			}
@@ -80,7 +93,7 @@ func readReq() {
 			fmt.Scanln()
 		case 0x14: // 20 Command Message
 			cmd, _ := parseAMF0Command(chunk.Payload)
-			cmd.Print()
+			// cmd.Print()
 			switch cmd.Name {
 			case "connect":
 				windowAckMsg := genProtocolControlMessage(5, 2_500_000)
@@ -124,7 +137,6 @@ func readReq() {
 					},
 				), conn)
 			}
-
 		}
 	}
 
@@ -205,4 +217,32 @@ func byteSliceToInt(data []byte) uint32 {
 	}
 
 	return res
+}
+
+func storeSeqHeader(msgStreamId uint32, isAudio bool, chunk Chunk) {
+	entry, exists := streamAudVidHeaders[msgStreamId]
+	if !exists {
+		entry = &StreamIdMapping{}
+		streamAudVidHeaders[msgStreamId] = entry
+	}
+	if isAudio {
+		entry.AudioSeqHeader = &chunk
+	} else {
+		entry.VideoSeqHeader = &chunk
+	}
+	t := time.Now()
+	fileName := "output_vid" + t.Format(time.Kitchen) + ".flv"
+	_, err := os.Stat(fileName)
+	if entry.HasBoth() && err != nil {
+		streamAudVidHeaders[msgStreamId].FileName = fileName
+		createFile(fileName)
+	}
+}
+
+func (h *StreamIdMapping) HasBoth() bool {
+	return h.AudioSeqHeader != nil && h.VideoSeqHeader != nil
+}
+
+func writeToFile() {
+
 }

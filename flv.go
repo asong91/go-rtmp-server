@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 )
 
 type AVCDecoderConfigurationRecord struct {
@@ -82,4 +83,26 @@ func parseAVCDecoderConfigurationRecord(data []byte) AVCDecoderConfigurationReco
 	}
 
 	return r
+}
+
+func createFile(fileName string) {
+	file, err := os.Create(fileName)
+	if err != nil {
+		fmt.Print("ERROR CREATING FILE")
+	}
+	file.Write(createHeader())
+	defer file.Close()
+}
+
+func createHeader() []byte {
+	header := make([]byte, 13)
+	header[0] = 0x46
+	header[1] = 0x4C
+	header[2] = 0x56
+	header[3] = 0x01
+	header[4] = 0x05
+	header[8] = 0x09
+
+	// header 9 bytes + prevtagsize 4bytes
+	return header
 }
