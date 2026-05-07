@@ -1,7 +1,7 @@
 # go-rtmp-server
 
 An RTMP ingestion server written in Go from scratch.
-This is a hobby project where I wanted to learn how RTMP works and Golang
+This is a hobby project where I wanted to learn Golang and how RTMP works
 
 Handles the full ingest lifecycle: handshake → chunk parsing → AMF0 command negotiation → audio/video stream receive.
 
