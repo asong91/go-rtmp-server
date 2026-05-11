@@ -6,6 +6,26 @@ import (
 	"os"
 )
 
+type FLVPacket struct {
+	tag             FLVTag
+	Payload         []byte
+	PreviousTagSize uint32
+}
+
+type FLVTag struct {
+	/*
+		[1 byte type]       ← 8=audio, 9=video, 18=script
+		[3 bytes data size] ← size of the payload
+		[3 bytes timestamp] ← milliseconds
+		[1 byte timestamp extended] ← upper 8 bits of timestamp
+		[3 bytes stream ID] ← always 0
+	*/
+	Type        uint8  // 1 byte
+	PayloadSize uint32 // 3 bytes
+	Timestamp   uint32 // 3 bytes + 1 optional byte extended
+	StreamId    uint32 // 3 bytes Always 0 apparently
+}
+
 type AVCDecoderConfigurationRecord struct {
 	ConfigurationVersion  uint8
 	AVCProfileIndication  uint8
@@ -85,17 +105,82 @@ func parseAVCDecoderConfigurationRecord(data []byte) AVCDecoderConfigurationReco
 	return r
 }
 
-func createFile(fileName string) {
+func createFile(fileName string) (*os.File, error) {
 	file, err := os.Create(fileName)
 	if err != nil {
 		fmt.Print("ERROR CREATING FILE")
+		return nil, err
 	}
-	file.Write(createHeader())
-	defer file.Close()
+	_, err = file.Write(createHeader())
+	if err != nil {
+		// file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+func (s *RTMPStream) Open(filename string) error {
+	f, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	s.file = f
+	return nil
+}
+
+func (s *RTMPStream) Write(data []byte) error {
+	_, err := s.file.Write(data)
+	return err
+}
+
+func (stream *RTMPStream) writeToFile(chunk Chunk) {
+
+	flvTag := FLVTag{}
+	flvTag.Type = chunk.ChunkHeader.ChunkMessageHeader.MessageTypeId
+	flvTag.PayloadSize = uint32(len(chunk.Payload))
+	if chunk.isAudioData() {
+		flvTag.Timestamp = stream.AudTimestamp
+	} else {
+		flvTag.Timestamp = stream.VidTimestamp
+	}
+
+	flvTag.StreamId = 0
+
+	flvPacket := FLVPacket{}
+	flvPacket.tag = flvTag
+	flvPacket.Payload = chunk.Payload
+	if stream.PrevFLVPacket.tag.Type == 0 {
+		flvPacket.PreviousTagSize = 0
+	} else {
+		flvPacket.PreviousTagSize = uint32(11 + stream.PrevFLVPacket.tag.PayloadSize)
+	}
+	stream.PrevFLVPacket = flvPacket
+
+	encodedByte := encodeFLVPacket(flvPacket)
+	// fmt.Printf("WRITING BYTES: %x %x %x %x\n", encodedByte[4], encodedByte[5], encodedByte[6], encodedByte[7])
+	stream.file.Write(encodedByte)
+}
+
+func encodeFLVPacket(packet FLVPacket) []byte {
+	res := []byte{}
+	res = append(res, byte(packet.PreviousTagSize>>24), byte(packet.PreviousTagSize>>16), byte(packet.PreviousTagSize>>8), byte(packet.PreviousTagSize))
+	res = append(res, encodeFLVTag(packet.tag)...)
+	res = append(res, packet.Payload...)
+	return res
+}
+
+func encodeFLVTag(tag FLVTag) []byte {
+	res := []byte{}
+	res = append(res, tag.Type)
+	res = append(res, byte(tag.PayloadSize>>16), byte(tag.PayloadSize>>8), byte(tag.PayloadSize))
+	res = append(res, byte(tag.Timestamp>>16), byte(tag.Timestamp>>8), byte(tag.Timestamp))
+	res = append(res, byte(tag.Timestamp>>24)) // timestamp extended
+	res = append(res, 0, 0, 0)
+	return res
 }
 
 func createHeader() []byte {
-	header := make([]byte, 13)
+	header := make([]byte, 9)
 	header[0] = 0x46
 	header[1] = 0x4C
 	header[2] = 0x56

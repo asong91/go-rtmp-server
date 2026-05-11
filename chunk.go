@@ -414,3 +414,11 @@ func (c *Chunk) readChunkSizeMessage() int {
 	value := binary.BigEndian.Uint32(c.Payload) & 0x7FFFFFFF
 	return int(value)
 }
+
+func (c *Chunk) isAudioData() bool {
+	return c.ChunkHeader.ChunkMessageHeader.MessageTypeId == 0x08
+}
+
+func (c *Chunk) isVideoData() bool {
+	return c.ChunkHeader.ChunkMessageHeader.MessageTypeId == 0x09
+}

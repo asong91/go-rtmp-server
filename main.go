@@ -16,13 +16,16 @@ const S1_C1_SIZE = 1536
 var conn net.Conn
 var chunkSize = 128 // default
 
-type StreamIdMapping struct {
+type RTMPStream struct {
 	AudioSeqHeader *Chunk
 	VideoSeqHeader *Chunk
-	FileName       string
+	AudTimestamp   uint32
+	VidTimestamp   uint32
+	file           *os.File
+	PrevFLVPacket  FLVPacket
 }
 
-var streamAudVidHeaders = make(map[uint32]*StreamIdMapping)
+var streamIdMap = make(map[uint32]*RTMPStream)
 
 func main() {
 	slog.SetLogLoggerLevel(slog.LevelDebug)
@@ -69,6 +72,7 @@ func readReq() {
 		case 0x01:
 			chunkSize = chunk.readChunkSizeMessage()
 		case 0x08: // Audio
+			setTimestamp(chunk)
 			packetType := chunk.Payload[1]
 			msgStreamId := chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId
 			if packetType == 0 {
@@ -76,21 +80,24 @@ func readReq() {
 				storeSeqHeader(msgStreamId, true, chunk)
 			} else if packetType == 1 {
 				// AAC Raw
+				streamIdMap[msgStreamId].writeToFile(chunk)
 			}
 			// parseAudioPacket(chunk.Payload)
 		case 0x09: // Video
+			setTimestamp(chunk)
 			packetType := chunk.Payload[1]
 			msgStreamId := chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId
 			if packetType == 0 {
 				// AVC Sequence Header
 				storeSeqHeader(msgStreamId, false, chunk)
+
 			} else if packetType == 1 {
 				// AVC NALU
+				streamIdMap[msgStreamId].writeToFile(chunk)
 			}
-			// parseAudioPacket(chunk.Payload)
 		case 0x12: // 18 Data Message
 			fmt.Printf(parseAMF0(chunk.Payload))
-			fmt.Scanln()
+			// fmt.Scanln()
 		case 0x14: // 20 Command Message
 			cmd, _ := parseAMF0Command(chunk.Payload)
 			// cmd.Print()
@@ -117,6 +124,15 @@ func readReq() {
 					0.0,
 					nil,
 				), conn)
+			case "FCUnpublish":
+				fmt.Printf("FCUNPBLISH TODO: FIGURE OUT WHAT TO DO HERE\n")
+				chunk.Print()
+				cmd.Print()
+			case "deleteStream":
+				cmd.Print()
+				// msgStreamId := chunk.ChunkHseader.ChunkMessageHeader.MessageStreamId
+				streamIdMap[1].file.Close()
+				break
 			case "createStream":
 				sendAMF0Message(SerializeAMF0(
 					"_result",
@@ -136,9 +152,17 @@ func readReq() {
 						{"description", "Stream is now published."},
 					},
 				), conn)
+				entry, exists := streamIdMap[chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId]
+				if !exists {
+					// create entry in map
+					entry = &RTMPStream{}
+					streamIdMap[chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId] = entry
+				}
 			}
 		}
 	}
+
+	fmt.Printf("Stream over...")
 
 }
 
@@ -220,29 +244,43 @@ func byteSliceToInt(data []byte) uint32 {
 }
 
 func storeSeqHeader(msgStreamId uint32, isAudio bool, chunk Chunk) {
-	entry, exists := streamAudVidHeaders[msgStreamId]
-	if !exists {
-		entry = &StreamIdMapping{}
-		streamAudVidHeaders[msgStreamId] = entry
-	}
+	stream := streamIdMap[msgStreamId]
 	if isAudio {
-		entry.AudioSeqHeader = &chunk
+		stream.AudioSeqHeader = &chunk
 	} else {
-		entry.VideoSeqHeader = &chunk
+		stream.VideoSeqHeader = &chunk
 	}
 	t := time.Now()
 	fileName := "output_vid" + t.Format(time.Kitchen) + ".flv"
 	_, err := os.Stat(fileName)
-	if entry.HasBoth() && err != nil {
-		streamAudVidHeaders[msgStreamId].FileName = fileName
-		createFile(fileName)
+	if stream.HasBoth() && err != nil {
+		file, err := createFile(fileName)
+		if err == nil {
+			// streamIdMap[msgStreamId].FileName = fileName
+			stream.file = file
+			stream.writeToFile(*stream.AudioSeqHeader)
+			stream.writeToFile(*stream.VideoSeqHeader)
+		}
 	}
 }
 
-func (h *StreamIdMapping) HasBoth() bool {
+func (h *RTMPStream) HasBoth() bool {
 	return h.AudioSeqHeader != nil && h.VideoSeqHeader != nil
 }
 
-func writeToFile() {
-
+func setTimestamp(c Chunk) {
+	stream := streamIdMap[c.ChunkHeader.ChunkMessageHeader.MessageStreamId]
+	if c.isAudioData() {
+		if c.ChunkHeader.ChunkBasicHeader.Fmt == 0 {
+			stream.AudTimestamp = c.ChunkHeader.ChunkMessageHeader.Timestamp
+		} else {
+			stream.AudTimestamp += c.ChunkHeader.ChunkMessageHeader.Timestamp
+		}
+	} else if c.isVideoData() {
+		if c.ChunkHeader.ChunkBasicHeader.Fmt == 0 {
+			stream.VidTimestamp = c.ChunkHeader.ChunkMessageHeader.Timestamp
+		} else {
+			stream.VidTimestamp += c.ChunkHeader.ChunkMessageHeader.Timestamp
+		}
+	}
 }
