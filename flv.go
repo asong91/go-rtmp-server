@@ -105,13 +105,14 @@ func parseAVCDecoderConfigurationRecord(data []byte) AVCDecoderConfigurationReco
 	return r
 }
 
-func createFile(fileName string) (*os.File, error) {
+func (s *Client) createFile(fileName string) (*os.File, error) {
 	file, err := os.Create(fileName)
 	if err != nil {
 		fmt.Print("ERROR CREATING FILE")
 		return nil, err
 	}
 	_, err = file.Write(createHeader())
+	file.Write(encodeFLVPacket(s.FlvOnMetaDataPacket))
 	if err != nil {
 		// file.Close()
 		return nil, err
@@ -119,7 +120,7 @@ func createFile(fileName string) (*os.File, error) {
 	return file, nil
 }
 
-func (s *RTMPStream) Open(filename string) error {
+func (s *Client) Open(filename string) error {
 	f, err := os.Create(filename)
 	if err != nil {
 		return err
@@ -128,12 +129,12 @@ func (s *RTMPStream) Open(filename string) error {
 	return nil
 }
 
-func (s *RTMPStream) Write(data []byte) error {
+func (s *Client) Write(data []byte) error {
 	_, err := s.file.Write(data)
 	return err
 }
 
-func (stream *RTMPStream) writeToFile(chunk Chunk) {
+func (stream *Client) writeToFile(chunk Chunk) {
 
 	flvTag := FLVTag{}
 	flvTag.Type = chunk.ChunkHeader.ChunkMessageHeader.MessageTypeId
@@ -141,7 +142,19 @@ func (stream *RTMPStream) writeToFile(chunk Chunk) {
 	if chunk.isAudioData() {
 		flvTag.Timestamp = stream.AudTimestamp
 	} else {
-		flvTag.Timestamp = stream.VidTimestamp
+		if chunk.Payload[1] == 0 {
+			// sequence header always timestamp 0
+			flvTag.Timestamp = 0
+		} else {
+
+			//compositionTime := uint32(chunk.Payload[2])<<16 | uint32(chunk.Payload[3])<<8 | uint32(chunk.Payload[4])
+			//flvTag.Timestamp = stream.VidTimestamp + compositionTime
+			flvTag.Timestamp = stream.VidTimestamp
+			//fmt.Printf("vidTs=%d compositionTime=%d PTS=%d\n",
+			//	stream.VidTimestamp,
+			//	compositionTime,
+			//	stream.VidTimestamp+compositionTime)
+		}
 	}
 
 	flvTag.StreamId = 0
@@ -157,7 +170,8 @@ func (stream *RTMPStream) writeToFile(chunk Chunk) {
 	stream.PrevFLVPacket = flvPacket
 
 	encodedByte := encodeFLVPacket(flvPacket)
-	// fmt.Printf("WRITING BYTES: %x %x %x %x\n", encodedByte[4], encodedByte[5], encodedByte[6], encodedByte[7])
+	//if flvTag.Type == 0x09 {}
+	//fmt.Printf("WRITING vidTs=%d type=%d\n", flvTag.Timestamp, flvTag.Type)
 	stream.file.Write(encodedByte)
 }
 
@@ -177,6 +191,21 @@ func encodeFLVTag(tag FLVTag) []byte {
 	res = append(res, byte(tag.Timestamp>>24)) // timestamp extended
 	res = append(res, 0, 0, 0)
 	return res
+}
+
+func (s *Client) genOnMetaData(data []byte) {
+	flvTag := FLVTag{}
+	flvTag.Type = 18
+	flvTag.PayloadSize = uint32(len(data))
+	flvTag.StreamId = 0
+	flvTag.Timestamp = 0
+
+	flvPacket := FLVPacket{}
+	flvPacket.tag = flvTag
+	flvPacket.Payload = data
+	flvPacket.PreviousTagSize = 0
+
+	s.FlvOnMetaDataPacket = flvPacket
 }
 
 func createHeader() []byte {

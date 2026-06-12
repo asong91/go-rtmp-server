@@ -22,6 +22,7 @@ ffmpeg -re -i assets/sample.mp4 -c copy -f flv rtmp://localhost:8080/
 
 ## TODO:
 
-- Save to file and different file types
+- Gracefully cut off connection if client stream suddenly interrupts. Right now the server crashes
+- Bitrate & Latency configurations
+- Save to file and different file types (probably different transcoding pipeline project)
 - Output to HLS
-- Support multiple clients at once.

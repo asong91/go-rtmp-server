@@ -33,3 +33,5 @@ go.work.sum
 
 *.flv
 .DS_Store
+
+.idea

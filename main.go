@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"time"
@@ -13,19 +14,26 @@ import (
 
 const S1_C1_SIZE = 1536
 
-var conn net.Conn
-var chunkSize = 128 // default
+var chunkSize = 4096
 
-type RTMPStream struct {
-	AudioSeqHeader *Chunk
-	VideoSeqHeader *Chunk
-	AudTimestamp   uint32
-	VidTimestamp   uint32
-	file           *os.File
-	PrevFLVPacket  FLVPacket
+// var conn net.Conn
+type Client struct {
+	conn                 net.Conn
+	chunkSize            int
+	previousChunkHeaders map[uint32]ChunkMessageHeader
+
+	// RTMP Stream Data
+	AudioSeqHeader      *Chunk
+	VideoSeqHeader      *Chunk
+	AudTimestamp        uint32
+	VidTimestamp        uint32
+	file                *os.File
+	PrevFLVPacket       FLVPacket
+	AudPacket           int
+	VidPacket           int
+	FlvOnMetaDataPacket FLVPacket
+	durationIndex       int
 }
-
-var streamIdMap = make(map[uint32]*RTMPStream)
 
 func main() {
 	slog.SetLogLoggerLevel(slog.LevelDebug)
@@ -41,108 +49,133 @@ func listen() {
 	defer listener.Close()
 
 	for {
-		conn, err = listener.Accept()
+		c, err := listener.Accept()
 		if err != nil {
 			log.Fatal("Error accepting connection:", err)
 		}
-
-		go rtmp()
+		client := Client{
+			conn:                 c,
+			chunkSize:            128,
+			previousChunkHeaders: make(map[uint32]ChunkMessageHeader)}
+		go client.rtmp()
 	}
 }
 
-func rtmp() {
-	println("Client connected:", conn.RemoteAddr().String())
-	_, err := initializeHandshake()
+func (cl *Client) rtmp() {
+	println("Client connected:", cl.conn.RemoteAddr().String())
+	_, err := cl.initializeHandshake()
 	if err != nil {
 		log.Fatal("Handshake failed:", err)
 	}
 	fmt.Println("---HANDSHAKE COMPLETE!---")
 
-	readReq()
-	defer conn.Close()
+	cl.readReq()
+	// defer conn.Close()
 }
 
-func readReq() {
+func (cl *Client) readReq() {
+ReadLoop:
 	for {
-		chunk := ReadChunk(conn)
+		chunk := cl.ReadChunk()
 		// chunk.Print()
 		// chunk.Print() // Waits for the user to press the Enter key
 		// fmt.Scanln()
 		switch chunk.ChunkHeader.ChunkMessageHeader.MessageTypeId {
 		case 0x01:
-			chunkSize = chunk.readChunkSizeMessage()
+			chunkSize := chunk.readChunkSizeMessage()
+			cl.chunkSize = chunkSize
+			fmt.Printf("CLIENT SET CHUNK SIZE: %d\n", chunkSize)
 		case 0x08: // Audio
-			setTimestamp(chunk)
+			cl.setTimestamp(chunk)
 			packetType := chunk.Payload[1]
 			msgStreamId := chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId
 			if packetType == 0 {
 				// AAC Sequence Header
-				storeSeqHeader(msgStreamId, true, chunk)
+				cl.storeSeqHeader(msgStreamId, true, chunk)
 			} else if packetType == 1 {
 				// AAC Raw
-				streamIdMap[msgStreamId].writeToFile(chunk)
+				cl.writeToFile(chunk)
 			}
+			cl.AudPacket++
 			// parseAudioPacket(chunk.Payload)
 		case 0x09: // Video
-			setTimestamp(chunk)
+			//chunk.ChunkHeader.Print()
+			// fmt.Printf("video: fmt=%d ts=%d msgLen=%d\n",
+			// 	chunk.ChunkHeader.ChunkBasicHeader.Fmt,
+			// 	chunk.ChunkHeader.ChunkMessageHeader.Timestamp,
+			// 	chunk.ChunkHeader.ChunkMessageHeader.MessageLength)
+			cl.setTimestamp(chunk)
+			//fmt.Printf("video fmt=%d rawDelta=%d vidTs=%d\n",
+			//	chunk.ChunkHeader.ChunkBasicHeader.Fmt,
+			//	chunk.ChunkHeader.ChunkMessageHeader.Timestamp,
+			//	streamIdMap[1].VidTimestamp)
 			packetType := chunk.Payload[1]
 			msgStreamId := chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId
 			if packetType == 0 {
 				// AVC Sequence Header
-				storeSeqHeader(msgStreamId, false, chunk)
+				cl.storeSeqHeader(msgStreamId, false, chunk)
 
 			} else if packetType == 1 {
 				// AVC NALU
-				streamIdMap[msgStreamId].writeToFile(chunk)
+				cl.writeToFile(chunk)
 			}
+			cl.VidPacket++
 		case 0x12: // 18 Data Message
-			fmt.Printf(parseAMF0(chunk.Payload))
+			//fmt.Printf("data:\n %s\n", parseAMF0(chunk.Payload))
 			// fmt.Scanln()
+			fmt.Printf("%s", parseAMF0(chunk.Payload))
+			cl.setOnMetaDataMessage(chunk.Payload)
 		case 0x14: // 20 Command Message
 			cmd, _ := parseAMF0Command(chunk.Payload)
 			// cmd.Print()
 			switch cmd.Name {
 			case "connect":
+				//cmd.Print()
 				windowAckMsg := genProtocolControlMessage(5, 2_500_000)
-				windowAckMsg.Send(conn)
+				windowAckMsg.Send(cl.conn)
 				peerBandMsg := genProtocolControlMessage(6, 2_500_000)
-				peerBandMsg.Send(conn)
+				peerBandMsg.Send(cl.conn)
 				beginMsg := genUserControlMessage(0, 0, 0)
-				beginMsg.Send(conn)
-				chunkSize := genProtocolControlMessage(1, 4096)
-				chunkSize.Send(conn)
-				sendAMF0Message(genConnectSuccess(1.0), conn)
+				beginMsg.Send(cl.conn)
+				chunkSize := genProtocolControlMessage(1, chunkSize)
+				chunkSize.Send(cl.conn)
+				sendAMF0CommandMessage(genConnectSuccess(1.0), cl.conn)
 			case "releaseStream":
-				sendAMF0Message(SerializeAMF0(
+				sendAMF0CommandMessage(SerializeAMF0(
 					"_result",
 					cmd.SeqNum,
 					nil,
-				), conn)
+				), cl.conn)
 			case "FCPublish":
-				sendAMF0Message(SerializeAMF0(
+				sendAMF0CommandMessage(SerializeAMF0(
 					"onFCPublish",
 					0.0,
 					nil,
-				), conn)
+				), cl.conn)
 			case "FCUnpublish":
 				fmt.Printf("FCUNPBLISH TODO: FIGURE OUT WHAT TO DO HERE\n")
-				chunk.Print()
-				cmd.Print()
+				//chunk.Print()
+				//cmd.Print()
 			case "deleteStream":
-				cmd.Print()
 				// msgStreamId := chunk.ChunkHseader.ChunkMessageHeader.MessageStreamId
-				streamIdMap[1].file.Close()
-				break
+				durationSeconds := float64(cl.AudTimestamp) / 1000.0
+				bits := math.Float64bits(durationSeconds)
+				var buf [8]byte
+				binary.BigEndian.PutUint64(buf[:], bits)
+				cl.file.WriteAt(buf[:], int64(cl.durationIndex))
+				cl.file.Close()
+				fmt.Printf("CLOSING TIMESTAMPS AUD: %d\nVID: %d\n %d %d", cl.AudTimestamp, cl.VidTimestamp, cl.AudPacket, cl.VidPacket)
+				break ReadLoop
 			case "createStream":
-				sendAMF0Message(SerializeAMF0(
+				sendAMF0CommandMessage(SerializeAMF0(
 					"_result",
 					cmd.SeqNum,
 					nil,
-					1.0), conn)
+					1.0), cl.conn)
 			case "publish":
 				streamBeginMsg := genUserControlMessage(0, 1, 0)
-				streamBeginMsg.Send(conn)
-				sendAMF0Message(SerializeAMF0(
+				streamBeginMsg.Send(cl.conn)
+				sendAMF0CommandMessage(SerializeAMF0(
 					"onStatus",
 					0.0,
 					nil,
@@ -151,13 +184,13 @@ func readReq() {
 						{"code", "NetStream.Publish.Start"},
 						{"description", "Stream is now published."},
 					},
-				), conn)
-				entry, exists := streamIdMap[chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId]
-				if !exists {
-					// create entry in map
-					entry = &RTMPStream{}
-					streamIdMap[chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId] = entry
-				}
+				), cl.conn)
+				// entry, exists := cl.stream
+				// if cl.stream == nil {
+				// 	// create entry in map
+				// 	entry = &RTMPStream{}
+				// 	streamIdMap[chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId] = entry
+				// }
 			}
 		}
 	}
@@ -166,11 +199,11 @@ func readReq() {
 
 }
 
-func initializeHandshake() (int, error) {
-	fmt.Printf("Starting RTMP handshake with client %s\n", conn.RemoteAddr().String())
+func (cl *Client) initializeHandshake() (int, error) {
+	fmt.Printf("Starting RTMP handshake with client %s\n", cl.conn.RemoteAddr().String())
 
 	// Read the first byte (C0) from the client
-	c0_buf := readBytes(1)
+	c0_buf := cl.readBytes(1)
 	if c0_buf == nil {
 		log.Fatal("Failed to read C0 byte from client")
 		return 0, fmt.Errorf("Failed to read C0 byte from client")
@@ -181,17 +214,17 @@ func initializeHandshake() (int, error) {
 		return 0, fmt.Errorf("Invalid handshake byte received: %d", c0_buf[0])
 	}
 
-	c1_buf := readBytes(S1_C1_SIZE) // Junk
+	c1_buf := cl.readBytes(S1_C1_SIZE) // Junk
 	if c1_buf == nil {
 		log.Fatal("Failed to read C1 byte from client")
 		return 0, fmt.Errorf("Failed to read C1 byte from client")
 	}
 
-	sendBytes([]byte{0x03}) // Send S0
-	sendBytes(makeS1())     // Send S1
-	sendBytes(makeS1())     // Send S2
+	cl.sendBytes([]byte{0x03}) // Send S0
+	cl.sendBytes(makeS1())     // Send S1
+	cl.sendBytes(makeS1())     // Send S2
 
-	c2_buf := readBytes(S1_C1_SIZE) // Junk
+	c2_buf := cl.readBytes(S1_C1_SIZE) // Junk
 	if c2_buf == nil {
 		log.Fatal("Failed to read C2 byte from client")
 		return 0, fmt.Errorf("Failed to read C2 byte from client")
@@ -199,9 +232,9 @@ func initializeHandshake() (int, error) {
 	return 1, nil
 }
 
-func readBytes(numBytes int) []byte {
+func (cl *Client) readBytes(numBytes int) []byte {
 	buf := make([]byte, numBytes)
-	_, err := conn.Read(buf)
+	_, err := cl.conn.Read(buf)
 	if err != nil {
 		log.Fatal("Error reading from connection:", err)
 		return nil
@@ -210,9 +243,9 @@ func readBytes(numBytes int) []byte {
 	return buf
 }
 
-func sendBytes(data []byte) {
+func (cl *Client) sendBytes(data []byte) {
 	fmt.Printf("Sending bytes %d \n", len(data))
-	n, err := conn.Write(data)
+	n, err := cl.conn.Write(data)
 	fmt.Printf("Sent %d bytes to client\n", n)
 	if err != nil {
 		log.Fatal("Error writing to connection:", err)
@@ -243,44 +276,52 @@ func byteSliceToInt(data []byte) uint32 {
 	return res
 }
 
-func storeSeqHeader(msgStreamId uint32, isAudio bool, chunk Chunk) {
-	stream := streamIdMap[msgStreamId]
+func (cl *Client) storeSeqHeader(msgStreamId uint32, isAudio bool, chunk Chunk) {
+	// stream := &cl.stream
 	if isAudio {
-		stream.AudioSeqHeader = &chunk
+		cl.AudioSeqHeader = &chunk
+		//fmt.Println("audio chunk ")
+		//chunk.Print()
 	} else {
-		stream.VideoSeqHeader = &chunk
+		cl.VideoSeqHeader = &chunk
+		//fmt.Println("video chunk ")
+		//chunk.Print()
 	}
 	t := time.Now()
-	fileName := "output_vid" + t.Format(time.Kitchen) + ".flv"
+	fileName := "output_vid" + t.Format(time.TimeOnly) + ".flv"
 	_, err := os.Stat(fileName)
-	if stream.HasBoth() && err != nil {
-		file, err := createFile(fileName)
+	if cl.HasBoth() && err != nil {
+		file, err := cl.createFile(fileName)
 		if err == nil {
 			// streamIdMap[msgStreamId].FileName = fileName
-			stream.file = file
-			stream.writeToFile(*stream.AudioSeqHeader)
-			stream.writeToFile(*stream.VideoSeqHeader)
+			cl.file = file
+			cl.writeToFile(*cl.AudioSeqHeader)
+			cl.writeToFile(*cl.VideoSeqHeader)
 		}
 	}
 }
 
-func (h *RTMPStream) HasBoth() bool {
+func (h *Client) HasBoth() bool {
 	return h.AudioSeqHeader != nil && h.VideoSeqHeader != nil
 }
 
-func setTimestamp(c Chunk) {
-	stream := streamIdMap[c.ChunkHeader.ChunkMessageHeader.MessageStreamId]
+func (cl *Client) setTimestamp(c Chunk) {
 	if c.isAudioData() {
 		if c.ChunkHeader.ChunkBasicHeader.Fmt == 0 {
-			stream.AudTimestamp = c.ChunkHeader.ChunkMessageHeader.Timestamp
+			cl.AudTimestamp = c.ChunkHeader.ChunkMessageHeader.Timestamp
 		} else {
-			stream.AudTimestamp += c.ChunkHeader.ChunkMessageHeader.Timestamp
+			cl.AudTimestamp += c.ChunkHeader.ChunkMessageHeader.Timestamp
 		}
 	} else if c.isVideoData() {
+		// fmt.Printf("fmt=%d rawDelta=%d vidTs_before=%d vidTs_after=%d\n",
+		// 	c.ChunkHeader.ChunkBasicHeader.Fmt,
+		// 	c.ChunkHeader.ChunkMessageHeader.Timestamp,
+		// 	stream.VidTimestamp,
+		// 	stream.VidTimestamp+c.ChunkHeader.ChunkMessageHeader.Timestamp)
 		if c.ChunkHeader.ChunkBasicHeader.Fmt == 0 {
-			stream.VidTimestamp = c.ChunkHeader.ChunkMessageHeader.Timestamp
+			cl.VidTimestamp = c.ChunkHeader.ChunkMessageHeader.Timestamp
 		} else {
-			stream.VidTimestamp += c.ChunkHeader.ChunkMessageHeader.Timestamp
+			cl.VidTimestamp += c.ChunkHeader.ChunkMessageHeader.Timestamp
 		}
 	}
 }

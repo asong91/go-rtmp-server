@@ -7,8 +7,6 @@ import (
 	"time"
 )
 
-var previousChunkHeaders = make(map[uint32]ChunkMessageHeader)
-
 type Chunk struct {
 	ChunkHeader ChunkHeader
 	Payload     []byte
@@ -37,14 +35,16 @@ type ChunkBasicHeader struct {
 	ChunkStreamId uint32 // at least 6 bits can be up to 6bits + 2 bytes. 22 bits
 }
 
-func ReadChunk(r io.Reader) Chunk {
-	header := ReadChunkHeader(r)
-	return Chunk{ChunkHeader: header, Payload: readMessage(int(header.ChunkMessageHeader.MessageLength), chunkSize, int(header.ChunkBasicHeader.ChunkStreamId))}
+func (cl *Client) ReadChunk() Chunk {
+	header := cl.ReadChunkHeader()
+	return Chunk{ChunkHeader: header, Payload: readMessage(cl.conn, int(header.ChunkMessageHeader.MessageLength), cl.chunkSize, int(header.ChunkBasicHeader.ChunkStreamId))}
 }
 
-func ReadChunkHeader(r io.Reader) ChunkHeader {
-	chunkBasicHeader := ReadChunkBasicHeader(r)
-	return ChunkHeader{ChunkBasicHeader: chunkBasicHeader, ChunkMessageHeader: ReadChunkMessagerHeader(r, chunkBasicHeader)}
+func (cl *Client) ReadChunkHeader() ChunkHeader {
+	chunkBasicHeader := ReadChunkBasicHeader(cl.conn)
+	return ChunkHeader{
+		ChunkBasicHeader:   chunkBasicHeader,
+		ChunkMessageHeader: cl.ReadChunkMessagerHeader(chunkBasicHeader)}
 }
 
 func ReadChunkBasicHeader(r io.Reader) ChunkBasicHeader {
@@ -60,6 +60,7 @@ func ReadChunkBasicHeader(r io.Reader) ChunkBasicHeader {
 		cs-id = 1. 3 bytes
 	*/
 	firstByte := readNumBytes(r, 1)
+	//fmt.Printf("FIRST BYTE % x\n", firstByte)
 
 	csIdType := (firstByte[0] & 0x3F)
 	csId := 0
@@ -87,37 +88,31 @@ func ReadChunkBasicHeader(r io.Reader) ChunkBasicHeader {
 	return ChunkBasicHeader{Fmt: uint8(chunkType), ChunkStreamId: uint32(csId)}
 }
 
-func ReadChunkMessagerHeader(r io.Reader, cbh ChunkBasicHeader) ChunkMessageHeader {
+func (cl *Client) ReadChunkMessagerHeader(cbh ChunkBasicHeader) ChunkMessageHeader {
+	csId := cbh.ChunkStreamId
 	chunkMessageHeader := ChunkMessageHeader{}
+	prevHeader := cl.previousChunkHeaders[csId]
+
 	switch cbh.Fmt {
 	case 0x0: // Type 0
-		header := readNumBytes(r, 11)
+		header := readNumBytes(cl.conn, 11)
 		chunkMessageHeader.parseHeaderType(0, header)
-		previousChunkHeaders[cbh.ChunkStreamId] = chunkMessageHeader
+		cl.previousChunkHeaders[csId] = chunkMessageHeader
 	case 0x1: // Type 1
-		header := readNumBytes(r, 7)
+		header := readNumBytes(cl.conn, 7)
 		chunkMessageHeader.parseHeaderType(1, header)
 		// inherit stream ID from previous
-		if prev, exists := previousChunkHeaders[cbh.ChunkStreamId]; exists {
-			chunkMessageHeader.MessageStreamId = prev.MessageStreamId
-		}
-		previousChunkHeaders[cbh.ChunkStreamId] = chunkMessageHeader
+		chunkMessageHeader.MessageStreamId = prevHeader.MessageStreamId
+		cl.previousChunkHeaders[csId] = chunkMessageHeader
 	case 0x2: // Type 2
-		header := readNumBytes(r, 3)
+		header := readNumBytes(cl.conn, 3)
 		chunkMessageHeader.parseHeaderType(2, header)
-		// inherit message length, type, and stream ID from previous
-		if prev, exists := previousChunkHeaders[cbh.ChunkStreamId]; exists {
-			chunkMessageHeader.MessageLength = prev.MessageLength
-			chunkMessageHeader.MessageTypeId = prev.MessageTypeId
-			chunkMessageHeader.MessageStreamId = prev.MessageStreamId
-		}
-		previousChunkHeaders[cbh.ChunkStreamId] = chunkMessageHeader
+		chunkMessageHeader.MessageLength = prevHeader.MessageLength
+		chunkMessageHeader.MessageTypeId = prevHeader.MessageTypeId
+		chunkMessageHeader.MessageStreamId = prevHeader.MessageStreamId
+		cl.previousChunkHeaders[csId] = chunkMessageHeader
 	case 0x3: // Type 3
-		if prev, exists := previousChunkHeaders[cbh.ChunkStreamId]; exists {
-			chunkMessageHeader = prev
-		} else {
-			fmt.Printf("WARNING: No previous header found for chunk stream ID %d\n", cbh.ChunkStreamId)
-		}
+		chunkMessageHeader = cl.previousChunkHeaders[csId]
 	}
 	return chunkMessageHeader
 }
@@ -176,7 +171,7 @@ func (c *Chunk) Print() {
 	fmt.Printf("\t\tPayloadLength:  %d\n", len(c.Payload))
 }
 
-func readMessage(msgLen int, chunkSize int, csId int) []byte {
+func readMessage(r io.Reader, msgLen int, chunkSize int, csId int) []byte {
 	// fmt.Printf("[readMessage]: msgLen: %d chunkSize: %d\n", msgLen, chunkSize)
 	buf := make([]byte, 0, msgLen)
 	remaining := msgLen
@@ -187,13 +182,13 @@ func readMessage(msgLen int, chunkSize int, csId int) []byte {
 			toRead = remaining
 		}
 
-		chunk := readBytes(toRead)
+		chunk := readNumBytes(r, toRead)
 		buf = append(buf, chunk...)
 		remaining -= toRead
 
 		// if more data remains, consume the 0xC3 continuation header
 		if remaining > 0 {
-			header := readBytes(1)
+			header := readNumBytes(r, 1)
 			expected := byte(0xC0) | byte(csId)
 			if header[0] != expected {
 				fmt.Printf("WARNING: expected %02x continuation header, got %02x\n", expected, header[0])
@@ -303,13 +298,19 @@ func genUserControlMessage(eventTypeId uint8, streamId int, bufferLen int) Chunk
 	chunk.ChunkHeader = chunkHeader
 	return chunk
 }
-
-func sendAMF0Message(payload []byte, w io.Writer) {
+func sendAMF0Packet(payload []byte, w io.Writer, messageTypeId uint8) {
 	chunkBasicHeader := ChunkBasicHeader{Fmt: 0, ChunkStreamId: 3} // TODO: This 3 might change
-	chunkMessageHeader := ChunkMessageHeader{Timestamp: 0, MessageTypeId: 20, MessageStreamId: 0}
+	chunkMessageHeader := ChunkMessageHeader{Timestamp: 0, MessageTypeId: messageTypeId, MessageStreamId: 0}
 	chunkHeader := ChunkHeader{ChunkBasicHeader: chunkBasicHeader, ChunkMessageHeader: chunkMessageHeader}
 	chunk := Chunk{ChunkHeader: chunkHeader, Payload: payload}
 	chunk.Send(w)
+}
+func sendAMF0CommandMessage(payload []byte, w io.Writer) {
+	sendAMF0Packet(payload, w, 20)
+}
+
+func sendAMF0DataMessage(payload []byte, w io.Writer) {
+	sendAMF0Packet(payload, w, 18)
 }
 
 func (c *Chunk) Send(w io.Writer) error {

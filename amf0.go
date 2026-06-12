@@ -18,13 +18,28 @@ const (
 	AMF0ObjectEnd    = 0x09
 )
 
+type OnMetaData struct {
+	duration        float64
+	fileSize        float64
+	width           float64
+	height          float64
+	videocodecid    float64
+	videodatarate   float64
+	framerate       float64
+	audiocodecid    float64
+	audiodatarate   float64
+	audiosamplerate float64
+	audiosamplesize float64
+	audiochannels   float64
+	stereo          float64
+}
+
 type AMF0Command struct {
 	Name   string
 	SeqNum float64
 	Args   []any
 }
 
-// for objects within commands
 type AMF0Field struct {
 	Key   string
 	Value any
@@ -125,7 +140,7 @@ func parseAMF0(data []byte) string {
 		readBytes += numReadBytes
 		amfBody += str
 	}
-	fmt.Printf("BODY: \n%s", amfBody)
+	//fmt.Printf("BODY: \n%s", amfBody)
 	return amfBody
 }
 
@@ -190,7 +205,7 @@ func parseBoolean(data []byte) (int, string) {
 func parseString(data []byte) (int, string) {
 	size := binary.BigEndian.Uint16(data[:2])
 	str := string(data[2 : 2+size])
-	fmt.Print(str + "\n")
+	//fmt.Print(str + "\n")
 	return 2 + int(size), str
 }
 
@@ -234,4 +249,43 @@ func (a *AMF0Command) Print() {
 			fmt.Printf("\t%v\n", v)
 		}
 	}
+}
+
+func (s *Client) setOnMetaDataMessage(data []byte) {
+	offset := 0
+
+	n, name := parseString(data[offset+1:]) // skip 0x02 type marker
+	offset += 1 + n
+	if name == "@setDataFrame" {
+		// TODO: If they send anything else this will break.
+		// I'm assuming everything after @setDataFrame is onMetaData
+		fmt.Println("---- SETTING DATA FRAME ----")
+		s.genOnMetaData(data[offset:])
+
+		relativeOffset := findDurationOffset(data[offset:])
+		fmt.Printf("\tRelative Offset: %d\n", relativeOffset)
+		if relativeOffset == -1 {
+			fmt.Println("Duration not found")
+		}
+		//fmt.Printf("OFFSET %d", 24+int(offset)+int(relativeOffset))
+		s.durationIndex = 24 + int(relativeOffset)
+
+	}
+	// TODO: I need to write flvheader to the top of the file
+	// I plan on saving it it an obj and when the stream ends, replace the value at that specific byte
+	// TODO: Look for @setDataFrame somehow
+	// Write the whole onMetaData either at a specific byte after the stream ends or just set the time value fields
+}
+
+func findDurationOffset(data []byte) int {
+	key := "duration"
+	for i := 0; i < len(data)-len(key); i++ {
+		// AMF0 string key: 2-byte length prefix + string bytes
+		keyLen := int(binary.BigEndian.Uint16(data[i : i+2]))
+		if keyLen == len(key) && string(data[i+2:i+2+keyLen]) == key {
+			// skip the 2-byte length + key bytes, then skip the 0x00 type marker
+			return i + 2 + keyLen + 1
+		}
+	}
+	return -1
 }
