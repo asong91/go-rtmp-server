@@ -141,6 +141,10 @@ func (stream *Client) writeToFile(chunk Chunk) {
 	flvTag.PayloadSize = uint32(len(chunk.Payload))
 	if chunk.isAudioData() {
 		flvTag.Timestamp = stream.AudTimestamp
+		if stream.AudPacket > 0 && flvTag.Timestamp <= stream.LastAudTagTimestamp {
+			flvTag.Timestamp = stream.LastAudTagTimestamp + 1
+		}
+		stream.LastAudTagTimestamp = flvTag.Timestamp
 	} else {
 		if chunk.Payload[1] == 0 {
 			// sequence header always timestamp 0
@@ -150,10 +154,15 @@ func (stream *Client) writeToFile(chunk Chunk) {
 			//compositionTime := uint32(chunk.Payload[2])<<16 | uint32(chunk.Payload[3])<<8 | uint32(chunk.Payload[4])
 			//flvTag.Timestamp = stream.VidTimestamp + compositionTime
 			flvTag.Timestamp = stream.VidTimestamp
-			//fmt.Printf("vidTs=%d compositionTime=%d PTS=%d\n",
-			//	stream.VidTimestamp,
-			//	compositionTime,
-			//	stream.VidTimestamp+compositionTime)
+			if stream.VidPacket > 0 && flvTag.Timestamp <= stream.LastVidTagTimestamp {
+				flvTag.Timestamp = stream.LastVidTagTimestamp + 1
+			}
+			stream.LastVidTagTimestamp = flvTag.Timestamp
+
+			// fmt.Printf("vidTs=%d compositionTime=%d PTS=%d\n",
+			// 	stream.VidTimestamp,
+			// 	compositionTime,
+			// 	stream.VidTimestamp+compositionTime)
 		}
 	}
 

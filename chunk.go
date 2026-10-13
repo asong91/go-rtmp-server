@@ -96,22 +96,26 @@ func (cl *Client) ReadChunkMessagerHeader(cbh ChunkBasicHeader) ChunkMessageHead
 	switch cbh.Fmt {
 	case 0x0: // Type 0
 		header := readNumBytes(cl.conn, 11)
+		// fmt.Printf("RAWHDR csId=%d fmt=0 bytes=% x\n", csId, header)
 		chunkMessageHeader.parseHeaderType(0, header)
 		cl.previousChunkHeaders[csId] = chunkMessageHeader
 	case 0x1: // Type 1
 		header := readNumBytes(cl.conn, 7)
+		// fmt.Printf("RAWHDR csId=%d fmt=1 bytes=% x\n", csId, header)
 		chunkMessageHeader.parseHeaderType(1, header)
 		// inherit stream ID from previous
 		chunkMessageHeader.MessageStreamId = prevHeader.MessageStreamId
 		cl.previousChunkHeaders[csId] = chunkMessageHeader
 	case 0x2: // Type 2
 		header := readNumBytes(cl.conn, 3)
+		// fmt.Printf("RAWHDR csId=%d fmt=2 bytes=% x\n", csId, header)
 		chunkMessageHeader.parseHeaderType(2, header)
 		chunkMessageHeader.MessageLength = prevHeader.MessageLength
 		chunkMessageHeader.MessageTypeId = prevHeader.MessageTypeId
 		chunkMessageHeader.MessageStreamId = prevHeader.MessageStreamId
 		cl.previousChunkHeaders[csId] = chunkMessageHeader
 	case 0x3: // Type 3
+		// fmt.Printf("RAWHDR csId=%d fmt=3 (no bytes, reusing delta=%d)\n", csId, cl.previousChunkHeaders[csId].Timestamp)
 		chunkMessageHeader = cl.previousChunkHeaders[csId]
 	}
 	return chunkMessageHeader
@@ -172,9 +176,10 @@ func (c *Chunk) Print() {
 }
 
 func readMessage(r io.Reader, msgLen int, chunkSize int, csId int) []byte {
-	// fmt.Printf("[readMessage]: msgLen: %d chunkSize: %d\n", msgLen, chunkSize)
+	// fmt.Printf("[readMessage]: msgLen=%d chunkSize=%d csId=%d\n", msgLen, chunkSize, csId)
 	buf := make([]byte, 0, msgLen)
 	remaining := msgLen
+	fragments := 0
 
 	for remaining > 0 {
 		toRead := chunkSize
@@ -185,17 +190,20 @@ func readMessage(r io.Reader, msgLen int, chunkSize int, csId int) []byte {
 		chunk := readNumBytes(r, toRead)
 		buf = append(buf, chunk...)
 		remaining -= toRead
+		fragments++
 
 		// if more data remains, consume the 0xC3 continuation header
 		if remaining > 0 {
 			header := readNumBytes(r, 1)
 			expected := byte(0xC0) | byte(csId)
+			// fmt.Printf("  [readMessage] fragment=%d remaining=%d continuationByte=% x expected=% x\n", fragments, remaining, header, expected)
 			if header[0] != expected {
 				fmt.Printf("WARNING: expected %02x continuation header, got %02x\n", expected, header[0])
 			}
 		}
 	}
 
+	// fmt.Printf("[readMessage] done csId=%d totalFragments=%d bufLen=%d wantedLen=%d\n", csId, fragments, len(buf), msgLen)
 	return buf
 }
 

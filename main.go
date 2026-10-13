@@ -27,6 +27,8 @@ type Client struct {
 	VideoSeqHeader      *Chunk
 	AudTimestamp        uint32
 	VidTimestamp        uint32
+	LastAudTagTimestamp uint32
+	LastVidTagTimestamp uint32
 	file                *os.File
 	PrevFLVPacket       FLVPacket
 	AudPacket           int
@@ -126,10 +128,13 @@ ReadLoop:
 			fmt.Printf("%s", parseAMF0(chunk.Payload))
 			cl.setOnMetaDataMessage(chunk.Payload)
 		case 0x14: // 20 Command Message
+			// chunk.Print()
+			fmt.Printf("%s", parseAMF0(chunk.Payload))
 			cmd, _ := parseAMF0Command(chunk.Payload)
 			// cmd.Print()
 			switch cmd.Name {
 			case "connect":
+				fmt.Printf("connecting")
 				//cmd.Print()
 				windowAckMsg := genProtocolControlMessage(5, 2_500_000)
 				windowAckMsg.Send(cl.conn)
@@ -158,7 +163,11 @@ ReadLoop:
 				//cmd.Print()
 			case "deleteStream":
 				// msgStreamId := chunk.ChunkHseader.ChunkMessageHeader.MessageStreamId
-				durationSeconds := float64(cl.AudTimestamp) / 1000.0
+				lastTimestamp := cl.AudTimestamp
+				if cl.VidTimestamp > lastTimestamp {
+					lastTimestamp = cl.VidTimestamp
+				}
+				durationSeconds := float64(lastTimestamp) / 1000.0
 				bits := math.Float64bits(durationSeconds)
 				var buf [8]byte
 				binary.BigEndian.PutUint64(buf[:], bits)
@@ -201,7 +210,6 @@ ReadLoop:
 
 func (cl *Client) initializeHandshake() (int, error) {
 	fmt.Printf("Starting RTMP handshake with client %s\n", cl.conn.RemoteAddr().String())
-
 	// Read the first byte (C0) from the client
 	c0_buf := cl.readBytes(1)
 	if c0_buf == nil {
@@ -307,6 +315,11 @@ func (h *Client) HasBoth() bool {
 
 func (cl *Client) setTimestamp(c Chunk) {
 	if c.isAudioData() {
+		// fmt.Printf("fmt=%d rawDelta=%d audTs_before=%d audTs_after=%d\n",
+		// 	c.ChunkHeader.ChunkBasicHeader.Fmt,
+		// 	c.ChunkHeader.ChunkMessageHeader.Timestamp,
+		// 	cl.AudTimestamp,
+		// 	cl.AudTimestamp+c.ChunkHeader.ChunkMessageHeader.Timestamp)
 		if c.ChunkHeader.ChunkBasicHeader.Fmt == 0 {
 			cl.AudTimestamp = c.ChunkHeader.ChunkMessageHeader.Timestamp
 		} else {
@@ -316,8 +329,8 @@ func (cl *Client) setTimestamp(c Chunk) {
 		// fmt.Printf("fmt=%d rawDelta=%d vidTs_before=%d vidTs_after=%d\n",
 		// 	c.ChunkHeader.ChunkBasicHeader.Fmt,
 		// 	c.ChunkHeader.ChunkMessageHeader.Timestamp,
-		// 	stream.VidTimestamp,
-		// 	stream.VidTimestamp+c.ChunkHeader.ChunkMessageHeader.Timestamp)
+		// 	cl.VidTimestamp,
+		// 	cl.VidTimestamp+c.ChunkHeader.ChunkMessageHeader.Timestamp)
 		if c.ChunkHeader.ChunkBasicHeader.Fmt == 0 {
 			cl.VidTimestamp = c.ChunkHeader.ChunkMessageHeader.Timestamp
 		} else {
