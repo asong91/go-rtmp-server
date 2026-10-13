@@ -18,9 +18,10 @@ var chunkSize = 4096
 
 // var conn net.Conn
 type Client struct {
-	conn                 net.Conn
-	chunkSize            int
-	previousChunkHeaders map[uint32]ChunkMessageHeader
+	conn                  net.Conn
+	chunkSize             int
+	previousChunkHeaders  map[uint32]ChunkMessageHeader
+	chunkStreamTimestamps map[uint32]uint32 // absolute timestamp per chunk stream id
 
 	// RTMP Stream Data
 	AudioSeqHeader      *Chunk
@@ -56,9 +57,10 @@ func listen() {
 			log.Fatal("Error accepting connection:", err)
 		}
 		client := Client{
-			conn:                 c,
-			chunkSize:            128,
-			previousChunkHeaders: make(map[uint32]ChunkMessageHeader)}
+			conn:                  c,
+			chunkSize:             128,
+			previousChunkHeaders:  make(map[uint32]ChunkMessageHeader),
+			chunkStreamTimestamps: make(map[uint32]uint32)}
 		go client.rtmp()
 	}
 }
@@ -79,6 +81,7 @@ func (cl *Client) readReq() {
 ReadLoop:
 	for {
 		chunk := cl.ReadChunk()
+		cl.setTimestamp(chunk)
 		// chunk.Print()
 		// chunk.Print() // Waits for the user to press the Enter key
 		// fmt.Scanln()
@@ -88,7 +91,6 @@ ReadLoop:
 			cl.chunkSize = chunkSize
 			fmt.Printf("CLIENT SET CHUNK SIZE: %d\n", chunkSize)
 		case 0x08: // Audio
-			cl.setTimestamp(chunk)
 			packetType := chunk.Payload[1]
 			msgStreamId := chunk.ChunkHeader.ChunkMessageHeader.MessageStreamId
 			if packetType == 0 {
@@ -106,7 +108,6 @@ ReadLoop:
 			// 	chunk.ChunkHeader.ChunkBasicHeader.Fmt,
 			// 	chunk.ChunkHeader.ChunkMessageHeader.Timestamp,
 			// 	chunk.ChunkHeader.ChunkMessageHeader.MessageLength)
-			cl.setTimestamp(chunk)
 			//fmt.Printf("video fmt=%d rawDelta=%d vidTs=%d\n",
 			//	chunk.ChunkHeader.ChunkBasicHeader.Fmt,
 			//	chunk.ChunkHeader.ChunkMessageHeader.Timestamp,
@@ -296,7 +297,8 @@ func (cl *Client) storeSeqHeader(msgStreamId uint32, isAudio bool, chunk Chunk) 
 		//chunk.Print()
 	}
 	t := time.Now()
-	fileName := "output_vid" + t.Format(time.TimeOnly) + ".flv"
+	fileName := "output_vid" + t.Format("2006-01-02_15-04-05") + ".flv"
+	// fileName := "testFile.flv"
 	_, err := os.Stat(fileName)
 	if cl.HasBoth() && err != nil {
 		file, err := cl.createFile(fileName)
@@ -314,27 +316,18 @@ func (h *Client) HasBoth() bool {
 }
 
 func (cl *Client) setTimestamp(c Chunk) {
+	// Timestamp deltas are relative to the previous message on the same chunk
+	// stream, whatever its type, so the running clock is kept per chunk stream.
+	csId := c.ChunkHeader.ChunkBasicHeader.ChunkStreamId
+	if c.ChunkHeader.ChunkBasicHeader.Fmt == 0 {
+		cl.chunkStreamTimestamps[csId] = c.ChunkHeader.ChunkMessageHeader.Timestamp
+	} else {
+		cl.chunkStreamTimestamps[csId] += c.ChunkHeader.ChunkMessageHeader.Timestamp
+	}
+
 	if c.isAudioData() {
-		// fmt.Printf("fmt=%d rawDelta=%d audTs_before=%d audTs_after=%d\n",
-		// 	c.ChunkHeader.ChunkBasicHeader.Fmt,
-		// 	c.ChunkHeader.ChunkMessageHeader.Timestamp,
-		// 	cl.AudTimestamp,
-		// 	cl.AudTimestamp+c.ChunkHeader.ChunkMessageHeader.Timestamp)
-		if c.ChunkHeader.ChunkBasicHeader.Fmt == 0 {
-			cl.AudTimestamp = c.ChunkHeader.ChunkMessageHeader.Timestamp
-		} else {
-			cl.AudTimestamp += c.ChunkHeader.ChunkMessageHeader.Timestamp
-		}
+		cl.AudTimestamp = cl.chunkStreamTimestamps[csId]
 	} else if c.isVideoData() {
-		// fmt.Printf("fmt=%d rawDelta=%d vidTs_before=%d vidTs_after=%d\n",
-		// 	c.ChunkHeader.ChunkBasicHeader.Fmt,
-		// 	c.ChunkHeader.ChunkMessageHeader.Timestamp,
-		// 	cl.VidTimestamp,
-		// 	cl.VidTimestamp+c.ChunkHeader.ChunkMessageHeader.Timestamp)
-		if c.ChunkHeader.ChunkBasicHeader.Fmt == 0 {
-			cl.VidTimestamp = c.ChunkHeader.ChunkMessageHeader.Timestamp
-		} else {
-			cl.VidTimestamp += c.ChunkHeader.ChunkMessageHeader.Timestamp
-		}
+		cl.VidTimestamp = cl.chunkStreamTimestamps[csId]
 	}
 }

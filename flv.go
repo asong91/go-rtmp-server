@@ -107,6 +107,7 @@ func parseAVCDecoderConfigurationRecord(data []byte) AVCDecoderConfigurationReco
 
 func (s *Client) createFile(fileName string) (*os.File, error) {
 	file, err := os.Create(fileName)
+	fmt.Println(err)
 	if err != nil {
 		fmt.Print("ERROR CREATING FILE")
 		return nil, err
