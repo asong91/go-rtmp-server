@@ -29,7 +29,7 @@ go.work.sum
 
 # Editor/IDE
 # .idea/
-# .vscode/
+.vscode/
 
 *.flv
 .DS_Store
@@ -37,3 +37,5 @@ go.work.sum
 .idea
 
 out/
+
+streams/

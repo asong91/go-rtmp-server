@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
 )
 
 type FLVPacket struct {
@@ -105,84 +104,72 @@ func parseAVCDecoderConfigurationRecord(data []byte) AVCDecoderConfigurationReco
 	return r
 }
 
-func (s *Client) createFile(fileName string) (*os.File, error) {
-	file, err := os.Create(fileName)
-	fmt.Println(err)
-	if err != nil {
-		fmt.Print("ERROR CREATING FILE")
-		return nil, err
-	}
-	_, err = file.Write(createHeader())
-	file.Write(encodeFLVPacket(s.FlvOnMetaDataPacket))
-	if err != nil {
-		// file.Close()
-		return nil, err
-	}
-	return file, nil
+type flvMuxer struct {
+	LastAudTagTimestamp uint32
+	LastVidTagTimestamp uint32
+	PrevFLVPacket       FLVPacket
+	AudPacket           bool
+	VidPacket           bool
 }
 
-func (s *Client) Open(filename string) error {
-	f, err := os.Create(filename)
-	if err != nil {
-		return err
-	}
-	s.file = f
-	return nil
-}
-
-func (s *Client) Write(data []byte) error {
-	_, err := s.file.Write(data)
-	return err
-}
-
-func (stream *Client) writeToFile(chunk Chunk) {
-
+func (fm *flvMuxer) createFLVPacket(chunk Chunk, timestamp uint32) []byte {
 	flvTag := FLVTag{}
 	flvTag.Type = chunk.ChunkHeader.ChunkMessageHeader.MessageTypeId
 	flvTag.PayloadSize = uint32(len(chunk.Payload))
 	if chunk.isAudioData() {
-		flvTag.Timestamp = stream.AudTimestamp
-		if stream.AudPacket > 0 && flvTag.Timestamp <= stream.LastAudTagTimestamp {
-			flvTag.Timestamp = stream.LastAudTagTimestamp + 1
+		if chunk.Payload[1] == 0 {
+			// sequence header always timestamp 0
+			flvTag.Timestamp = 0
+		} else {
+			flvTag.Timestamp = timestamp
+			if fm.AudPacket && flvTag.Timestamp <= fm.LastAudTagTimestamp {
+				flvTag.Timestamp = fm.LastAudTagTimestamp + 1
+			}
+			fm.LastAudTagTimestamp = flvTag.Timestamp
+			fm.AudPacket = true
 		}
-		stream.LastAudTagTimestamp = flvTag.Timestamp
 	} else {
 		if chunk.Payload[1] == 0 {
 			// sequence header always timestamp 0
 			flvTag.Timestamp = 0
 		} else {
-
-			//compositionTime := uint32(chunk.Payload[2])<<16 | uint32(chunk.Payload[3])<<8 | uint32(chunk.Payload[4])
-			//flvTag.Timestamp = stream.VidTimestamp + compositionTime
-			flvTag.Timestamp = stream.VidTimestamp
-			if stream.VidPacket > 0 && flvTag.Timestamp <= stream.LastVidTagTimestamp {
-				flvTag.Timestamp = stream.LastVidTagTimestamp + 1
+			flvTag.Timestamp = timestamp
+			if fm.VidPacket && flvTag.Timestamp <= fm.LastVidTagTimestamp {
+				flvTag.Timestamp = fm.LastVidTagTimestamp + 1
 			}
-			stream.LastVidTagTimestamp = flvTag.Timestamp
-
-			// fmt.Printf("vidTs=%d compositionTime=%d PTS=%d\n",
-			// 	stream.VidTimestamp,
-			// 	compositionTime,
-			// 	stream.VidTimestamp+compositionTime)
+			fm.LastVidTagTimestamp = flvTag.Timestamp
+			fm.VidPacket = true
 		}
 	}
 
 	flvTag.StreamId = 0
 
+	// Start serialization
 	flvPacket := FLVPacket{}
 	flvPacket.tag = flvTag
 	flvPacket.Payload = chunk.Payload
-	if stream.PrevFLVPacket.tag.Type == 0 {
+	if fm.PrevFLVPacket.tag.Type == 0 {
 		flvPacket.PreviousTagSize = 0
 	} else {
-		flvPacket.PreviousTagSize = uint32(11 + stream.PrevFLVPacket.tag.PayloadSize)
+		flvPacket.PreviousTagSize = uint32(11 + fm.PrevFLVPacket.tag.PayloadSize)
 	}
-	stream.PrevFLVPacket = flvPacket
+	fm.PrevFLVPacket = flvPacket
 
-	encodedByte := encodeFLVPacket(flvPacket)
-	//if flvTag.Type == 0x09 {}
-	//fmt.Printf("WRITING vidTs=%d type=%d\n", flvTag.Timestamp, flvTag.Type)
-	stream.file.Write(encodedByte)
+	return encodeFLVPacket(flvPacket)
+}
+
+// Opening bytes of every FLV stream: header, onMetaData, then both sequence headers.
+// Every tag goes through the muxer so the PreviousTagSize chain stays correct.
+func (fm *flvMuxer) createStartPackets(metadata FLVPacket, audHeader Chunk, vidHeader Chunk) []byte {
+	res := createHeader()
+	if metadata.tag.Type != 0 {
+		metadata.PreviousTagSize = 0 // first tag after the header
+		res = append(res, encodeFLVPacket(metadata)...)
+		fm.PrevFLVPacket = metadata
+	}
+	res = append(res, fm.createFLVPacket(audHeader, 0)...)
+	res = append(res, fm.createFLVPacket(vidHeader, 0)...)
+	return res
 }
 
 func encodeFLVPacket(packet FLVPacket) []byte {

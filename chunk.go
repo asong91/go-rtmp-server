@@ -35,19 +35,33 @@ type ChunkBasicHeader struct {
 	ChunkStreamId uint32 // at least 6 bits can be up to 6bits + 2 bytes. 22 bits
 }
 
-func (cl *Client) ReadChunk() Chunk {
-	header := cl.ReadChunkHeader()
-	return Chunk{ChunkHeader: header, Payload: readMessage(cl.conn, int(header.ChunkMessageHeader.MessageLength), cl.chunkSize, int(header.ChunkBasicHeader.ChunkStreamId))}
+func (cl *Client) ReadChunk() (Chunk, error) {
+	header, err := cl.ReadChunkHeader()
+	if err != nil {
+		return Chunk{}, err
+	}
+	payload, err := readMessage(cl.conn, int(header.ChunkMessageHeader.MessageLength), cl.chunkSize, int(header.ChunkBasicHeader.ChunkStreamId))
+	if err != nil {
+		return Chunk{}, fmt.Errorf("reading message: %w", err)
+	}
+	return Chunk{ChunkHeader: header, Payload: payload}, nil
 }
 
-func (cl *Client) ReadChunkHeader() ChunkHeader {
-	chunkBasicHeader := ReadChunkBasicHeader(cl.conn)
+func (cl *Client) ReadChunkHeader() (ChunkHeader, error) {
+	chunkBasicHeader, err := ReadChunkBasicHeader(cl.conn)
+	if err != nil {
+		return ChunkHeader{}, fmt.Errorf("reading basic header: %w", err)
+	}
+	chunkMessageHeader, err := cl.ReadChunkMessagerHeader(chunkBasicHeader)
+	if err != nil {
+		return ChunkHeader{}, fmt.Errorf("reading message header: %w", err)
+	}
 	return ChunkHeader{
 		ChunkBasicHeader:   chunkBasicHeader,
-		ChunkMessageHeader: cl.ReadChunkMessagerHeader(chunkBasicHeader)}
+		ChunkMessageHeader: chunkMessageHeader}, nil
 }
 
-func ReadChunkBasicHeader(r io.Reader) ChunkBasicHeader {
+func ReadChunkBasicHeader(r io.Reader) (ChunkBasicHeader, error) {
 	/*
 		First byte is fmt(2 bits) + cs-id (6 bits)
 		0 1 2 3 4 5 6 7
@@ -59,7 +73,10 @@ func ReadChunkBasicHeader(r io.Reader) ChunkBasicHeader {
 		cs-id = 0. 2 bytes
 		cs-id = 1. 3 bytes
 	*/
-	firstByte := readNumBytes(r, 1)
+	firstByte, err := readNumBytes(r, 1)
+	if err != nil {
+		return ChunkBasicHeader{}, err
+	}
 	//fmt.Printf("FIRST BYTE % x\n", firstByte)
 
 	csIdType := (firstByte[0] & 0x3F)
@@ -70,11 +87,17 @@ func ReadChunkBasicHeader(r io.Reader) ChunkBasicHeader {
 	*/
 	switch csIdType {
 	case 0:
-		csIdByte := readNumBytes(r, 1)
+		csIdByte, err := readNumBytes(r, 1)
+		if err != nil {
+			return ChunkBasicHeader{}, err
+		}
 		csId = int(csIdByte[0]) + 64
 		// fmt.Printf("cs id type 0, % x\n", csId)
 	case 1:
-		csIdByte := readNumBytes(r, 2)
+		csIdByte, err := readNumBytes(r, 2)
+		if err != nil {
+			return ChunkBasicHeader{}, err
+		}
 		csId = int(csIdByte[1])*256 + int(csIdByte[0]) + 64
 		// fmt.Printf("cs id type 1, % x\n", csId)
 	default:
@@ -85,29 +108,34 @@ func ReadChunkBasicHeader(r io.Reader) ChunkBasicHeader {
 	// fmt.Printf("Chunk Fmt Type, % x\n", chunkType)
 	// cbh.Fmt = uint8(chunkType)
 	// cbh.ChunkStreamID = uint32(csId)
-	return ChunkBasicHeader{Fmt: uint8(chunkType), ChunkStreamId: uint32(csId)}
+	return ChunkBasicHeader{Fmt: uint8(chunkType), ChunkStreamId: uint32(csId)}, nil
 }
 
-func (cl *Client) ReadChunkMessagerHeader(cbh ChunkBasicHeader) ChunkMessageHeader {
+// Message header size depends on fmt: 11, 7, 3 or 0 bytes
+var messageHeaderSizes = [4]int{11, 7, 3, 0}
+
+func (cl *Client) ReadChunkMessagerHeader(cbh ChunkBasicHeader) (ChunkMessageHeader, error) {
 	csId := cbh.ChunkStreamId
 	chunkMessageHeader := ChunkMessageHeader{}
 	prevHeader := cl.previousChunkHeaders[csId]
 
+	header, err := readNumBytes(cl.conn, messageHeaderSizes[cbh.Fmt])
+	if err != nil {
+		return ChunkMessageHeader{}, err
+	}
+
 	switch cbh.Fmt {
 	case 0x0: // Type 0
-		header := readNumBytes(cl.conn, 11)
 		// fmt.Printf("RAWHDR csId=%d fmt=0 bytes=% x\n", csId, header)
 		chunkMessageHeader.parseHeaderType(0, header)
 		cl.previousChunkHeaders[csId] = chunkMessageHeader
 	case 0x1: // Type 1
-		header := readNumBytes(cl.conn, 7)
 		// fmt.Printf("RAWHDR csId=%d fmt=1 bytes=% x\n", csId, header)
 		chunkMessageHeader.parseHeaderType(1, header)
 		// inherit stream ID from previous
 		chunkMessageHeader.MessageStreamId = prevHeader.MessageStreamId
 		cl.previousChunkHeaders[csId] = chunkMessageHeader
 	case 0x2: // Type 2
-		header := readNumBytes(cl.conn, 3)
 		// fmt.Printf("RAWHDR csId=%d fmt=2 bytes=% x\n", csId, header)
 		chunkMessageHeader.parseHeaderType(2, header)
 		chunkMessageHeader.MessageLength = prevHeader.MessageLength
@@ -118,7 +146,7 @@ func (cl *Client) ReadChunkMessagerHeader(cbh ChunkBasicHeader) ChunkMessageHead
 		// fmt.Printf("RAWHDR csId=%d fmt=3 (no bytes, reusing delta=%d)\n", csId, cl.previousChunkHeaders[csId].Timestamp)
 		chunkMessageHeader = cl.previousChunkHeaders[csId]
 	}
-	return chunkMessageHeader
+	return chunkMessageHeader, nil
 }
 
 func (cmh *ChunkMessageHeader) parseHeaderType(chunkType uint8, data []byte) {
@@ -139,16 +167,6 @@ func (cmh *ChunkMessageHeader) parseHeaderType(chunkType uint8, data []byte) {
 		msgStreamId := data[7:11]
 		cmh.MessageStreamId = binary.LittleEndian.Uint32(msgStreamId)
 	}
-}
-
-func readNumBytes(r io.Reader, numBytes int) []byte {
-	buf := make([]byte, numBytes)
-	_, err := r.Read(buf)
-	if err != nil {
-		return nil
-	}
-
-	return buf
 }
 
 func (ch ChunkHeader) Print() {
@@ -175,7 +193,7 @@ func (c *Chunk) Print() {
 	fmt.Printf("\t\tPayloadLength:  %d\n", len(c.Payload))
 }
 
-func readMessage(r io.Reader, msgLen int, chunkSize int, csId int) []byte {
+func readMessage(r io.Reader, msgLen int, chunkSize int, csId int) ([]byte, error) {
 	// fmt.Printf("[readMessage]: msgLen=%d chunkSize=%d csId=%d\n", msgLen, chunkSize, csId)
 	buf := make([]byte, 0, msgLen)
 	remaining := msgLen
@@ -187,14 +205,20 @@ func readMessage(r io.Reader, msgLen int, chunkSize int, csId int) []byte {
 			toRead = remaining
 		}
 
-		chunk := readNumBytes(r, toRead)
+		chunk, err := readNumBytes(r, toRead)
+		if err != nil {
+			return nil, err
+		}
 		buf = append(buf, chunk...)
 		remaining -= toRead
 		fragments++
 
 		// if more data remains, consume the 0xC3 continuation header
 		if remaining > 0 {
-			header := readNumBytes(r, 1)
+			header, err := readNumBytes(r, 1)
+			if err != nil {
+				return nil, err
+			}
 			expected := byte(0xC0) | byte(csId)
 			// fmt.Printf("  [readMessage] fragment=%d remaining=%d continuationByte=% x expected=% x\n", fragments, remaining, header, expected)
 			if header[0] != expected {
@@ -204,7 +228,7 @@ func readMessage(r io.Reader, msgLen int, chunkSize int, csId int) []byte {
 	}
 
 	// fmt.Printf("[readMessage] done csId=%d totalFragments=%d bufLen=%d wantedLen=%d\n", csId, fragments, len(buf), msgLen)
-	return buf
+	return buf, nil
 }
 
 func genProtocolControlMessage(msgTypeId uint8, payload int) Chunk {
@@ -306,25 +330,27 @@ func genUserControlMessage(eventTypeId uint8, streamId int, bufferLen int) Chunk
 	chunk.ChunkHeader = chunkHeader
 	return chunk
 }
-func sendAMF0Packet(payload []byte, w io.Writer, messageTypeId uint8) {
+
+func sendAMF0Packet(payload []byte, w io.Writer, messageTypeId uint8) error {
 	chunkBasicHeader := ChunkBasicHeader{Fmt: 0, ChunkStreamId: 3} // TODO: This 3 might change
 	chunkMessageHeader := ChunkMessageHeader{Timestamp: 0, MessageTypeId: messageTypeId, MessageStreamId: 0}
 	chunkHeader := ChunkHeader{ChunkBasicHeader: chunkBasicHeader, ChunkMessageHeader: chunkMessageHeader}
 	chunk := Chunk{ChunkHeader: chunkHeader, Payload: payload}
-	chunk.Send(w)
-}
-func sendAMF0CommandMessage(payload []byte, w io.Writer) {
-	sendAMF0Packet(payload, w, 20)
+	return chunk.Send(w)
 }
 
-func sendAMF0DataMessage(payload []byte, w io.Writer) {
-	sendAMF0Packet(payload, w, 18)
+func sendAMF0CommandMessage(payload []byte, w io.Writer) error {
+	return sendAMF0Packet(payload, w, 20)
+}
+
+func sendAMF0DataMessage(payload []byte, w io.Writer) error {
+	return sendAMF0Packet(payload, w, 18)
 }
 
 func (c *Chunk) Send(w io.Writer) error {
 	// Set message length based on payload size
 	c.ChunkHeader.ChunkMessageHeader.MessageLength = uint32(len(c.Payload))
-	fmt.Println("SENDING CHUNK")
+	// fmt.Println("SENDING CHUNK")
 	// c.Print()
 
 	// Create a buffer to hold all serialized data
@@ -416,12 +442,22 @@ func (c *Chunk) serializeMessageHeaderBuffer() []byte {
 	return []byte{}
 }
 
-func (c *Chunk) readChunkSizeMessage() int {
+// A message can't be longer than 0xFFFFFF (3 byte length), so neither can a chunk
+const maxChunkSize = 0xFFFFFF
+
+func (c *Chunk) readChunkSizeMessage() (int, error) {
+	if len(c.Payload) < 4 {
+		return 0, fmt.Errorf("set chunk size payload is %d bytes, want 4", len(c.Payload))
+	}
 	if c.Payload[0]>>7 != 0 {
 		fmt.Printf("ERROR BYTE PACKET IS INVALID FOR CHUNK SIZE")
 	}
-	value := binary.BigEndian.Uint32(c.Payload) & 0x7FFFFFFF
-	return int(value)
+	value := int(binary.BigEndian.Uint32(c.Payload) & 0x7FFFFFFF)
+	// A chunk size of 0 would make readMessage loop forever
+	if value < 1 || value > maxChunkSize {
+		return 0, fmt.Errorf("invalid chunk size %d", value)
+	}
+	return value, nil
 }
 
 func (c *Chunk) isAudioData() bool {
